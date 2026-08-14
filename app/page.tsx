@@ -1,0 +1,170 @@
+"use client";
+
+import Link from "next/link";
+import { ChangeEvent, DragEvent, FormEvent, type CSSProperties, useEffect, useRef, useState } from "react";
+import type { User } from "@supabase/supabase-js";
+import { demoResult, type AnalysisResult } from "@/lib/analysis";
+import { createBrowserSupabaseClient } from "@/lib/supabase/client";
+
+const sampleJob = `高级产品经理｜杭州
+
+我们期待你主导核心增长产品，围绕用户洞察、商业目标与跨团队协作，持续推进产品从 0 到 1 及规模化迭代。
+
+你需要：3 年以上互联网产品经验；具备数据分析能力和增长思维；能独立完成需求洞察、方案设计及项目落地；优秀的沟通协作能力。`;
+
+const supabaseEnabled = Boolean(
+  process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY,
+);
+
+function Score({ score }: { score: number }) {
+  const style = { "--score": `${Math.min(100, Math.max(0, score))}%` } as CSSProperties;
+  return <div className="score" style={style}><div><b>{score}</b><small>/ 100</small></div></div>;
+}
+
+export default function Home() {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [file, setFile] = useState<File | null>(null);
+  const [resumeText, setResumeText] = useState("");
+  const [savedResumeId, setSavedResumeId] = useState<string | null>(null);
+  const [jobDescription, setJobDescription] = useState(sampleJob);
+  const [status, setStatus] = useState<"idle" | "reading" | "ready" | "loading" | "error">("idle");
+  const [error, setError] = useState("");
+  const [result, setResult] = useState<AnalysisResult>(demoResult);
+  const [isDemo, setIsDemo] = useState(true);
+  const [user, setUser] = useState<User | null>(null);
+  const [loginOpen, setLoginOpen] = useState(false);
+  const [email, setEmail] = useState("");
+  const [authMessage, setAuthMessage] = useState("");
+  const [authLoading, setAuthLoading] = useState(false);
+
+  useEffect(() => {
+    if (!supabaseEnabled) return;
+    const supabase = createBrowserSupabaseClient();
+    void supabase.auth.getUser().then(({ data }) => setUser(data.user));
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => setUser(session?.user ?? null));
+    if (new URLSearchParams(window.location.search).get("auth") === "error") {
+      setLoginOpen(true);
+      setAuthMessage("登录链接已失效或无法验证，请重新发送。 ");
+    }
+    return () => subscription.unsubscribe();
+  }, []);
+
+  async function extractPdf(selected: File) {
+    if (selected.type !== "application/pdf" && !selected.name.toLowerCase().endsWith(".pdf")) {
+      setStatus("error"); setError("请上传 PDF 格式的简历。"); return;
+    }
+    if (selected.size > 20 * 1024 * 1024) {
+      setStatus("error"); setError("简历文件不能超过 20 MB。"); return;
+    }
+    setStatus("reading"); setError("");
+    try {
+      const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+      pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/legacy/build/pdf.worker.min.mjs", import.meta.url).toString();
+      const document = await pdfjs.getDocument({ data: await selected.arrayBuffer() }).promise;
+      const pages = await Promise.all(Array.from({ length: document.numPages }, async (_, index) => {
+        const page = await document.getPage(index + 1);
+        const content = await page.getTextContent();
+        return content.items.map((item) => "str" in item ? item.str : "").join(" ");
+      }));
+      const text = pages.join("\n").replace(/\s{2,}/g, " ").trim();
+      if (text.length < 30) throw new Error("empty PDF");
+      setFile(selected); setResumeText(text); setSavedResumeId(null); setStatus("ready");
+    } catch {
+      setFile(null); setResumeText(""); setSavedResumeId(null); setStatus("error");
+      setError("这份 PDF 未能提取到文字。请使用可选中文本版简历后重试。");
+    }
+  }
+
+  function onFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const selected = event.target.files?.[0];
+    if (selected) void extractPdf(selected);
+  }
+
+  function onDrop(event: DragEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    const selected = event.dataTransfer.files?.[0];
+    if (selected) void extractPdf(selected);
+  }
+
+  async function saveResume() {
+    if (!file) throw new Error("请先上传 PDF 简历。");
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("parsedText", resumeText);
+    const response = await fetch("/api/resumes", { method: "POST", body: formData });
+    const payload = await response.json() as { resume?: { id: string }; error?: string };
+    if (!response.ok || !payload.resume?.id) throw new Error(payload.error || "简历保存失败。");
+    setSavedResumeId(payload.resume.id);
+    return payload.resume.id;
+  }
+
+  async function analyze() {
+    if (!resumeText || !jobDescription.trim()) return;
+    if (!supabaseEnabled) {
+      setStatus("error"); setError("尚未配置 Supabase。请先填写 .env.local 并执行数据库迁移。"); return;
+    }
+    if (!user) {
+      setLoginOpen(true); setAuthMessage("登录后即可安全保存简历与分析历史。 "); return;
+    }
+
+    setStatus("loading"); setError("");
+    try {
+      const resumeId = savedResumeId || await saveResume();
+      const response = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resumeId, jobDescription }),
+      });
+      const payload = await response.json() as { result?: AnalysisResult; error?: string };
+      if (!response.ok || !payload.result) throw new Error(payload.error || "分析失败");
+      setResult(payload.result); setIsDemo(false);
+      document.querySelector("#report")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      setStatus("ready");
+    } catch (caught) {
+      setStatus("error"); setError(caught instanceof Error ? caught.message : "分析失败，请稍后重试。");
+    }
+  }
+
+  async function sendMagicLink(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!supabaseEnabled) {
+      setAuthMessage("请先填写 Supabase 项目环境变量。 "); return;
+    }
+    setAuthLoading(true); setAuthMessage("");
+    const supabase = createBrowserSupabaseClient();
+    const { error: signInError } = await supabase.auth.signInWithOtp({
+      email,
+      options: { emailRedirectTo: `${window.location.origin}/auth/callback?next=/` },
+    });
+    setAuthLoading(false);
+    setAuthMessage(signInError ? signInError.message : "登录链接已发送，请前往邮箱完成验证。 ");
+  }
+
+  async function signOut() {
+    if (!supabaseEnabled) return;
+    await createBrowserSupabaseClient().auth.signOut();
+    setUser(null); setSavedResumeId(null);
+  }
+
+  const ready = Boolean(resumeText && jobDescription.trim());
+  const accountLabel = user?.email?.split("@")[0] || "我的账户";
+
+  return <div className="shell">
+    <nav className="nav"><div className="brand"><span className="mark">履</span><b>履历</b><small>CAREER INTELLIGENCE</small></div><div className="nav-actions">{user ? <><Link className="history-link" href="/history">我的分析</Link><button className="account-button" type="button" onClick={() => void signOut()} title="退出登录">{accountLabel}<span>退出</span></button></> : <button className="login-button" type="button" onClick={() => { setLoginOpen(true); setAuthMessage(""); }}>登录并保存</button>}<div className="nav-note"><i>●</i> 让每一次投递，更接近理想工作</div></div></nav>
+    <header className="hero"><div><div className="eyebrow">THE CAREER EDITOR / 01</div><h1>把经验，写成<br />值得被看见的<em>机会。</em></h1><p>上传你的履历，告诉我们你向往的岗位。我们将用一份清晰、诚实而有说服力的职业叙事，帮你走近下一次面试。</p></div><aside><b>从简历到回音</b><p>定位匹配 · 打磨表达 ·<br />为下一场对话做好准备</p></aside></header>
+    <main>
+      <section className="workspace" aria-label="求职材料输入区"><div className="workspace-head"><h2>给我两份材料</h2><span className="step">STEP 01 — 02</span></div><div className="input-grid">
+        <article className="input-card"><div className="input-label"><span>你的简历</span><span>PDF</span></div><button className="upload" type="button" onClick={() => inputRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={onDrop}><div><div className="pdf">PDF</div><div className="file">{status === "reading" ? "正在提取简历文字…" : file?.name || "拖拽或点击上传简历"}</div><div className="meta">{file ? `${(file.size / 1024 / 1024).toFixed(1)} MB · 已解析文字` : "支持可选中文本的 PDF · 最大 20 MB"}</div>{status === "ready" && <div className="ready"><i>✓</i>{savedResumeId ? "已安全保存" : "已准备好分析"}</div>}</div></button><input ref={inputRef} type="file" accept="application/pdf,.pdf" onChange={onFileChange} hidden /></article>
+        <article className="input-card"><div className="input-label"><span>目标岗位描述</span><span>{jobDescription.length.toLocaleString()} / 3,000</span></div><textarea value={jobDescription} onChange={(event) => setJobDescription(event.target.value)} maxLength={3000} aria-label="岗位描述" /><div className="hint">粘贴完整 JD，分析会更贴近真实招聘要求</div></article>
+      </div><div className="action-row"><span className="privacy">{user ? "你的材料仅用于本次分析与个人历史保存" : "登录后可安全保存材料与分析历史"}</span><button className="analyze" type="button" disabled={!ready || status === "loading"} onClick={() => void analyze()}>{status === "loading" ? "正在深度分析…" : user ? "开始深度分析" : "登录后分析"}<span>→</span></button></div>{error && <p className="error-message" role="alert">{error}</p>}</section>
+
+      <section className="report" id="report"><div className="report-top"><div><div className="section-no">02 / YOUR CAREER BRIEF</div><h2>为「高级产品经理」准备的<br />一份更有力的表达。</h2></div><span className="date">{isDemo ? "ANALYSIS SAMPLE · 2026.08" : "AI ANALYSIS · JUST NOW"}</span></div>
+        <section className="match"><div className="score-panel"><div><div className="section-no">01 / MATCH ANALYSIS</div><h3>岗位匹配度</h3><div className="score-wrap"><Score score={result.score} /><p className="score-note">{result.summary}</p></div></div><p className="score-foot">与你的目标岗位相比，核心能力项已覆盖 {Math.min(9, Math.max(1, Math.round(result.score / 11)))} / 9。</p></div><div className="match-copy"><div className="section-no">02 / WHAT WE SEE</div><h3>{result.insightTitle}</h3><p>{result.insight}</p><div className="tags">{result.strengths.map((item) => <span className="tag good" key={item}>{item}</span>)}{result.gaps.map((item) => <span className="tag gap" key={item}>{item}</span>)}</div></div></section>
+        <div className="lower"><section className="advice"><header className="panel-head"><div><div className="section-no">03 / RESUME EDIT</div><h3>简历优化建议</h3></div><span className="priority">{result.suggestions.length} 项优先修改</span></header>{result.suggestions.map((item, index) => <div className="advice-item" key={`${item.title}-${index}`}><b>{String(index + 1).padStart(2, "0")}　{item.title}</b><div className="original">{item.original}</div><div className="improved"><span>建议：</span>{item.suggested}</div></div>)}</section><div className="stack"><section className="letter"><header className="panel-head"><div><div className="section-no">04 / COVER LETTER</div><h3>为你写一封信</h3></div><button className="copy" type="button" onClick={() => void navigator.clipboard.writeText(result.coverLetter)}>可复制</button></header><div className="letter-body">{result.coverLetter.split("\n").map((line, index) => line ? <p key={index}>{line}</p> : <br key={index} />)}</div></section></div></div>
+        <section className="questions"><header className="panel-head"><div><div className="section-no">05 / INTERVIEW PREP</div><h3>带着答案，走进面试。</h3></div><span className="priority">10 个高概率问题</span></header><p className="intro">围绕岗位最看重的能力，提前组织属于你的真实故事。</p><div className="question-grid">{result.interviewQuestions.map((item, index) => <article className="question" key={`${item.question}-${index}`}><span className="q-num">{String(index + 1).padStart(2, "0")}</span><h4>{item.question}</h4><p><b>参考：</b>{item.answer}</p></article>)}</div></section>
+      </section>
+    </main><footer><span>履历 · CAREER INTELLIGENCE</span><span>{user ? "分析结果已安全保存至你的账户" : "登录后保存你的材料与分析历史"}</span></footer>
+
+    {loginOpen && <div className="auth-backdrop" role="presentation" onMouseDown={() => setLoginOpen(false)}><section className="auth-dialog" role="dialog" aria-modal="true" aria-labelledby="auth-title" onMouseDown={(event) => event.stopPropagation()}><button className="dialog-close" type="button" onClick={() => setLoginOpen(false)} aria-label="关闭">×</button><div className="section-no">ACCOUNT ACCESS</div><h2 id="auth-title">把每一份努力，<br />妥善保存。</h2><p>登录后，简历、岗位材料与分析结果只会保存在你的个人账户中。</p><form onSubmit={(event) => void sendMagicLink(event)}><label htmlFor="email">邮箱地址</label><input id="email" type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" /><button className="auth-submit" type="submit" disabled={authLoading}>{authLoading ? "正在发送…" : "发送登录链接 →"}</button></form>{authMessage && <p className="auth-message" role="status">{authMessage}</p>}<small>我们使用邮箱验证登录，不需要设置密码。</small></section></div>}
+  </div>;
+}
