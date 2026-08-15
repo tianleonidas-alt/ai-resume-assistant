@@ -1,10 +1,13 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { ChangeEvent, DragEvent, FormEvent, type CSSProperties, useEffect, useRef, useState } from "react";
 import type { User } from "@supabase/supabase-js";
 import { demoResult, type AnalysisResult } from "@/lib/analysis";
 import { createBrowserSupabaseClient } from "@/lib/supabase/client";
+
+type AuthenticatedUser = Pick<User, "id" | "email">;
 
 const sampleJob = `高级产品经理｜杭州
 
@@ -21,7 +24,16 @@ function Score({ score }: { score: number }) {
   return <div className="score" style={style}><div><b>{score}</b><small>/ 100</small></div></div>;
 }
 
+function formatAuthEmailError(error: { message?: string; code?: string } | null) {
+  const detail = `${error?.code || ""} ${error?.message || ""}`.toLowerCase();
+  if (detail.includes("rate limit") || detail.includes("over_email_send_rate_limit")) {
+    return "验证邮件发送过于频繁，Supabase 已暂时限流。请等待至少 1 小时后仅重试一次；持续使用前请配置自定义 SMTP。";
+  }
+  return "暂时无法发送邮件，请稍后再试。";
+}
+
 export default function Home() {
+  const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
   const [resumeText, setResumeText] = useState("");
@@ -31,22 +43,36 @@ export default function Home() {
   const [error, setError] = useState("");
   const [result, setResult] = useState<AnalysisResult>(demoResult);
   const [isDemo, setIsDemo] = useState(true);
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<AuthenticatedUser | null>(null);
   const [loginOpen, setLoginOpen] = useState(false);
+  const [authMode, setAuthMode] = useState<"signIn" | "signUp" | "forgot">("signIn");
   const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [authMessage, setAuthMessage] = useState("");
+  const [authMessageKind, setAuthMessageKind] = useState<"success" | "error">("success");
   const [authLoading, setAuthLoading] = useState(false);
 
   useEffect(() => {
     if (!supabaseEnabled) return;
-    const supabase = createBrowserSupabaseClient();
-    void supabase.auth.getUser().then(({ data }) => setUser(data.user));
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => setUser(session?.user ?? null));
-    if (new URLSearchParams(window.location.search).get("auth") === "error") {
+    void fetch("/api/auth/session", { credentials: "same-origin", cache: "no-store" })
+      .then(async (response) => response.ok ? await response.json() as { user: AuthenticatedUser } : { user: null })
+      .then((payload) => setUser(payload.user))
+      .catch(() => setUser(null));
+    const authState = new URLSearchParams(window.location.search).get("auth");
+    if (authState === "error") {
       setLoginOpen(true);
-      setAuthMessage("登录链接已失效或无法验证，请重新发送。 ");
+      setAuthMessageKind("error");
+      setAuthMessage("验证链接已失效或无法完成验证，请重试。 ");
     }
-    return () => subscription.unsubscribe();
+    if (authState === "confirmed") {
+      setAuthMessageKind("success");
+      setAuthMessage("邮箱已确认，欢迎回来。 ");
+    }
+    if (authState === "password-updated") {
+      setAuthMessageKind("success");
+      setAuthMessage("密码已更新，请使用新密码登录。 ");
+    }
   }, []);
 
   async function extractPdf(selected: File) {
@@ -91,7 +117,7 @@ export default function Home() {
     const formData = new FormData();
     formData.append("file", file);
     formData.append("parsedText", resumeText);
-    const response = await fetch("/api/resumes", { method: "POST", body: formData });
+    const response = await fetch("/api/resumes", { method: "POST", credentials: "same-origin", body: formData });
     const payload = await response.json() as { resume?: { id: string }; error?: string };
     if (!response.ok || !payload.resume?.id) throw new Error(payload.error || "简历保存失败。");
     setSavedResumeId(payload.resume.id);
@@ -113,6 +139,7 @@ export default function Home() {
       const response = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
         body: JSON.stringify({ resumeId, jobDescription }),
       });
       const payload = await response.json() as { result?: AnalysisResult; error?: string };
@@ -125,32 +152,98 @@ export default function Home() {
     }
   }
 
-  async function sendMagicLink(event: FormEvent<HTMLFormElement>) {
+  function openAuth(mode: "signIn" | "signUp" | "forgot") {
+    setAuthMode(mode);
+    setAuthMessage("");
+    setAuthMessageKind("success");
+    setPassword("");
+    setConfirmPassword("");
+    setLoginOpen(true);
+  }
+
+  function setAuthError(message: string) {
+    setAuthMessageKind("error");
+    setAuthMessage(message);
+  }
+
+  async function handleAuthSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!supabaseEnabled) {
-      setAuthMessage("请先填写 Supabase 项目环境变量。 "); return;
+      setAuthError("请先填写 Supabase 项目环境变量。 "); return;
     }
     setAuthLoading(true); setAuthMessage("");
     const supabase = createBrowserSupabaseClient();
-    const { error: signInError } = await supabase.auth.signInWithOtp({
-      email,
-      options: { emailRedirectTo: `${window.location.origin}/auth/callback?next=/` },
+
+    if (authMode === "signUp") {
+      if (password.length < 8) {
+        setAuthLoading(false); setAuthError("密码至少需要 8 位。 "); return;
+      }
+      if (password !== confirmPassword) {
+        setAuthLoading(false); setAuthError("两次输入的密码不一致。 "); return;
+      }
+      const response = await fetch("/api/auth/signup", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      const payload = await response.json() as { user?: AuthenticatedUser; error?: string };
+      setAuthLoading(false);
+      if (!response.ok || !payload.user) {
+        setAuthError(payload.error || "暂时无法创建账户，请稍后再试。");
+        return;
+      }
+      setUser(payload.user);
+      setPassword(""); setConfirmPassword("");
+      setLoginOpen(false);
+      router.refresh();
+      return;
+    }
+
+    if (authMode === "forgot") {
+      const { error: resetError } = await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo: `${window.location.origin}/auth/callback?next=/reset-password`,
+      });
+      setAuthLoading(false);
+      if (resetError) {
+        setAuthError(formatAuthEmailError(resetError));
+        return;
+      }
+      setAuthMessageKind("success");
+      setAuthMessage("如该邮箱已注册，重设密码链接已发送，请前往邮箱查收。 ");
+      return;
+    }
+
+    const response = await fetch("/api/auth/login", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
     });
+    const payload = await response.json() as { user?: AuthenticatedUser; error?: string; code?: string };
     setAuthLoading(false);
-    setAuthMessage(signInError ? signInError.message : "登录链接已发送，请前往邮箱完成验证。 ");
+    if (!response.ok || !payload.user) {
+      setAuthError(payload.error || "邮箱或密码不正确，请重试。 ");
+      return;
+    }
+    setUser(payload.user);
+    setPassword("");
+    setLoginOpen(false);
+    router.refresh();
   }
 
   async function signOut() {
     if (!supabaseEnabled) return;
-    await createBrowserSupabaseClient().auth.signOut();
+    await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
     setUser(null); setSavedResumeId(null);
+    router.refresh();
   }
 
   const ready = Boolean(resumeText && jobDescription.trim());
   const accountLabel = user?.email?.split("@")[0] || "我的账户";
 
   return <div className="shell">
-    <nav className="nav"><div className="brand"><span className="mark">履</span><b>履历</b><small>CAREER INTELLIGENCE</small></div><div className="nav-actions">{user ? <><Link className="history-link" href="/history">我的分析</Link><button className="account-button" type="button" onClick={() => void signOut()} title="退出登录">{accountLabel}<span>退出</span></button></> : <button className="login-button" type="button" onClick={() => { setLoginOpen(true); setAuthMessage(""); }}>登录并保存</button>}<div className="nav-note"><i>●</i> 让每一次投递，更接近理想工作</div></div></nav>
+    <nav className="nav"><div className="brand"><span className="mark">履</span><b>履历</b><small>CAREER INTELLIGENCE</small></div><div className="nav-actions">{user ? <><Link className="history-link" href="/history">我的分析</Link><button className="account-button" type="button" onClick={() => void signOut()} title="退出登录">{accountLabel}<span>退出</span></button></> : <button className="login-button" type="button" onClick={() => openAuth("signIn")}>登录并保存</button>}<div className="nav-note"><i>●</i> 让每一次投递，更接近理想工作</div></div></nav>
     <header className="hero"><div><div className="eyebrow">THE CAREER EDITOR / 01</div><h1>把经验，写成<br />值得被看见的<em>机会。</em></h1><p>上传你的履历，告诉我们你向往的岗位。我们将用一份清晰、诚实而有说服力的职业叙事，帮你走近下一次面试。</p></div><aside><b>从简历到回音</b><p>定位匹配 · 打磨表达 ·<br />为下一场对话做好准备</p></aside></header>
     <main>
       <section className="workspace" aria-label="求职材料输入区"><div className="workspace-head"><h2>给我两份材料</h2><span className="step">STEP 01 — 02</span></div><div className="input-grid">
@@ -165,6 +258,6 @@ export default function Home() {
       </section>
     </main><footer><span>履历 · CAREER INTELLIGENCE</span><span>{user ? "分析结果已安全保存至你的账户" : "登录后保存你的材料与分析历史"}</span></footer>
 
-    {loginOpen && <div className="auth-backdrop" role="presentation" onMouseDown={() => setLoginOpen(false)}><section className="auth-dialog" role="dialog" aria-modal="true" aria-labelledby="auth-title" onMouseDown={(event) => event.stopPropagation()}><button className="dialog-close" type="button" onClick={() => setLoginOpen(false)} aria-label="关闭">×</button><div className="section-no">ACCOUNT ACCESS</div><h2 id="auth-title">把每一份努力，<br />妥善保存。</h2><p>登录后，简历、岗位材料与分析结果只会保存在你的个人账户中。</p><form onSubmit={(event) => void sendMagicLink(event)}><label htmlFor="email">邮箱地址</label><input id="email" type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" /><button className="auth-submit" type="submit" disabled={authLoading}>{authLoading ? "正在发送…" : "发送登录链接 →"}</button></form>{authMessage && <p className="auth-message" role="status">{authMessage}</p>}<small>我们使用邮箱验证登录，不需要设置密码。</small></section></div>}
+    {loginOpen && <div className="auth-backdrop" role="presentation" onMouseDown={() => setLoginOpen(false)}><section className="auth-dialog" role="dialog" aria-modal="true" aria-labelledby="auth-title" onMouseDown={(event) => event.stopPropagation()}><button className="dialog-close" type="button" onClick={() => setLoginOpen(false)} aria-label="关闭">×</button><div className="section-no">ACCOUNT ACCESS</div><h2 id="auth-title">{authMode === "signUp" ? <>为下一次机会，<br />建立你的档案。</> : authMode === "forgot" ? <>重新设置，<br />继续向前。</> : <>把每一份努力，<br />妥善保存。</>}</h2><p>{authMode === "signUp" ? "创建账户后即可开始分析。你的求职材料与分析结果将只保存在个人账户中。" : authMode === "forgot" ? "输入你的注册邮箱。若账户存在，我们会发送安全的密码重设链接。" : "登录后，简历、岗位材料与分析结果只会保存在你的个人账户中。"}</p><div className="auth-tabs" role="tablist" aria-label="账户操作"><button type="button" role="tab" aria-selected={authMode === "signIn"} className={authMode === "signIn" ? "active" : ""} onClick={() => openAuth("signIn")}>登录</button><button type="button" role="tab" aria-selected={authMode === "signUp"} className={authMode === "signUp" ? "active" : ""} onClick={() => openAuth("signUp")}>注册</button></div><form onSubmit={(event) => void handleAuthSubmit(event)}><label htmlFor="email">邮箱地址</label><input id="email" type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" />{authMode !== "forgot" && <><label htmlFor="password">密码</label><input id="password" type="password" autoComplete={authMode === "signUp" ? "new-password" : "current-password"} required minLength={8} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="至少 8 位" />{authMode === "signUp" && <><label htmlFor="confirm-password">确认密码</label><input id="confirm-password" type="password" autoComplete="new-password" required minLength={8} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="再次输入密码" /></>}</>}<button className="auth-submit" type="submit" disabled={authLoading}>{authLoading ? "正在处理…" : authMode === "signUp" ? "创建账户并继续 →" : authMode === "forgot" ? "发送重设链接 →" : "登录并继续 →"}</button></form>{authMode === "signIn" && <button className="auth-inline-action" type="button" onClick={() => openAuth("forgot")}>忘记密码？</button>}{authMode === "forgot" && <button className="auth-inline-action" type="button" onClick={() => openAuth("signIn")}>返回登录</button>}{authMessage && <p className={`auth-message ${authMessageKind === "error" ? "error" : ""}`} role="status">{authMessage}</p>}<small>{authMode === "signUp" ? "无需邮箱确认，注册后可直接使用邮箱和密码登录。" : authMode === "forgot" ? "重设链接将发送至你的注册邮箱。" : "还没有账户？请选择“注册”创建一个。"}</small></section></div>}
   </div>;
 }

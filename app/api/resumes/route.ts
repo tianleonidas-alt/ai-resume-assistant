@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createAdminSupabaseClient } from "@/lib/supabase/admin";
-import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { getAuthenticatedRequestUser } from "@/lib/supabase/request-user";
 
 export const runtime = "nodejs";
 
@@ -8,8 +8,7 @@ const MAX_FILE_SIZE = 20 * 1024 * 1024;
 
 export async function POST(request: Request) {
   try {
-    const supabase = await createServerSupabaseClient();
-    const { data: { user } } = await supabase.auth.getUser();
+    const user = await getAuthenticatedRequestUser(request);
     if (!user) return NextResponse.json({ error: "请先登录后再保存简历。" }, { status: 401 });
 
     const formData = await request.formData();

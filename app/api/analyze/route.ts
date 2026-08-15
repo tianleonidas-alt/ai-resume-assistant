@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { AnalysisResult } from "@/lib/analysis";
 import { createAdminSupabaseClient } from "@/lib/supabase/admin";
-import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { getAuthenticatedRequestUser } from "@/lib/supabase/request-user";
 
 export const runtime = "nodejs";
 
@@ -41,8 +41,7 @@ export async function POST(request: Request) {
   let admin: ReturnType<typeof createAdminSupabaseClient> | null = null;
 
   try {
-    const supabase = await createServerSupabaseClient();
-    const { data: { user } } = await supabase.auth.getUser();
+    const user = await getAuthenticatedRequestUser(request);
     if (!user) return publicError("请先登录后再开始分析。", 401);
 
     const { resumeId, jobDescription } = await request.json() as { resumeId?: string; jobDescription?: string };

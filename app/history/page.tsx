@@ -23,13 +23,14 @@ export default async function HistoryPage() {
   }
 
   const supabase = await createServerSupabaseClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) redirect("/?auth=required");
+  const { data: claimsData, error: claimsError } = await supabase.auth.getClaims();
+  const userId = typeof claimsData?.claims?.sub === "string" ? claimsData.claims.sub : null;
+  if (claimsError || !userId) redirect("/?auth=required");
 
   const { data, error } = await supabase
     .from("analysis_runs")
     .select("id, status, created_at, job_descriptions(job_title, company_name), analysis_results(score)")
-    .eq("user_id", user.id)
+    .eq("user_id", userId)
     .order("created_at", { ascending: false })
     .limit(50);
 
