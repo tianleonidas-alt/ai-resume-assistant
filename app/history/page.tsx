@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { redirect } from "next/navigation";
+import { AuthGate } from "@/components/auth-gate";
 import { hasPublicSupabaseConfig } from "@/lib/supabase/config";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 
@@ -25,7 +25,9 @@ export default async function HistoryPage() {
   const supabase = await createServerSupabaseClient();
   const { data: claimsData, error: claimsError } = await supabase.auth.getClaims();
   const userId = typeof claimsData?.claims?.sub === "string" ? claimsData.claims.sub : null;
-  if (claimsError || !userId) redirect("/?auth=required");
+  if (claimsError || !userId) {
+    return <main className="history-shell"><nav className="history-nav"><Link href="/" className="back-link">← 返回分析页</Link><span>履历 · ANALYSIS ARCHIVE</span></nav><AuthGate message="登录后查看你的分析历史。" /></main>;
+  }
 
   const { data, error } = await supabase
     .from("analysis_runs")

@@ -6,6 +6,7 @@ import { ChangeEvent, DragEvent, FormEvent, useEffect, useRef, useState } from "
 import type { User } from "@supabase/supabase-js";
 import { demoResult, titleFromJobDescription, type AnalysisResult } from "@/lib/analysis";
 import { deleteAnalysisDraft, readAnalysisDraft, writeAnalysisDraft } from "@/lib/analysis-draft";
+import { extractPdfText } from "@/lib/pdf";
 import { createBrowserSupabaseClient } from "@/lib/supabase/client";
 import { AnalysisReport } from "@/components/analysis-report";
 
@@ -119,16 +120,7 @@ export default function Home() {
     }
     setStatus("reading"); setError("");
     try {
-      const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-      pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/legacy/build/pdf.worker.min.mjs", import.meta.url).toString();
-      const document = await pdfjs.getDocument({ data: await selected.arrayBuffer() }).promise;
-      const pages = await Promise.all(Array.from({ length: document.numPages }, async (_, index) => {
-        const page = await document.getPage(index + 1);
-        const content = await page.getTextContent();
-        return content.items.map((item) => "str" in item ? item.str : "").join(" ");
-      }));
-      const text = pages.join("\n").replace(/\s{2,}/g, " ").trim();
-      if (text.length < 30) throw new Error("empty PDF");
+      const text = await extractPdfText(selected);
       setFile(selected); setResumeText(text); setSavedResumeId(null); setStatus("ready");
     } catch {
       setFile(null); setResumeText(""); setSavedResumeId(null); setStatus("error");
@@ -280,7 +272,7 @@ export default function Home() {
   const accountLabel = user?.email?.split("@")[0] || "我的账户";
 
   return <div className="shell">
-    <nav className="nav"><div className="brand"><span className="mark">履</span><b>履历</b><small>CAREER INTELLIGENCE</small></div><div className="nav-actions">{user ? <><Link className="history-link" href="/history">我的分析</Link><button className="account-button" type="button" onClick={() => void signOut()} title="退出登录">{accountLabel}<span>退出</span></button></> : <button className="login-button" type="button" onClick={() => openAuth("signIn")}>登录并保存</button>}<div className="nav-note"><i>●</i> 让每一次投递，更接近理想工作</div></div></nav>
+    <nav className="nav"><div className="brand"><span className="mark">履</span><b>履历</b><small>CAREER INTELLIGENCE</small></div><div className="nav-actions">{user ? <><Link className="history-link" href="/resume-pages">我的在线页</Link><Link className="history-link" href="/history">我的分析</Link><button className="account-button" type="button" onClick={() => void signOut()} title="退出登录">{accountLabel}<span>退出</span></button></> : <button className="login-button" type="button" onClick={() => openAuth("signIn")}>登录并保存</button>}<div className="nav-note"><i>●</i> 让每一次投递，更接近理想工作</div></div></nav>
     <header className="hero"><div><div className="eyebrow">THE CAREER EDITOR / 01</div><h1>把经验，写成值得被看见的<em>机会。</em></h1></div><div className="hero-details"><p>上传你的履历，告诉我们你向往的岗位。我们将用一份清晰、诚实而有说服力的职业叙事，帮你走近下一次面试。</p><aside><b>从简历到回音</b><p>定位匹配 · 打磨表达 ·<br />为下一场对话做好准备</p></aside></div></header>
     <main>
       <section className="workspace" aria-label="求职材料输入区"><div className="workspace-head"><h2>给我两份材料</h2><span className="step">STEP 01 — 02</span></div><div className="input-grid">
