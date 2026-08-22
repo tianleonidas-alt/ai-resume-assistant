@@ -43,14 +43,70 @@ export function normalizeCoverLetter(coverLetter: string) {
     .trim();
 }
 
-export function normalizeAnalysisResult(result: AnalysisResult): AnalysisResult {
+function asString(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function asBoundedScore(value: unknown, fallback: number): number {
+  const score = typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  return Math.max(0, Math.min(100, Math.round(score)));
+}
+
+function asStringArray(value: unknown, maxItems: number): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter(Boolean)
+    .slice(0, maxItems);
+}
+
+export function normalizeAnalysisResult(result: Partial<AnalysisResult>): AnalysisResult {
+  const raw = (result ?? {}) as unknown as Record<string, unknown>;
+
+  const suggestionsRaw = Array.isArray(raw.suggestions) ? raw.suggestions : [];
+  const suggestions: ResumeSuggestion[] = suggestionsRaw
+    .map((item) => {
+      if (item === null || typeof item !== "object") return null;
+      const entry = item as Record<string, unknown>;
+      const title = asString(entry.title, "待补充");
+      const original = asString(entry.original, "待补充");
+      const suggested = asString(entry.suggested, "待补充");
+      if (!title && !original && !suggested) return null;
+      const priority = entry.priority === "高" || entry.priority === "低" ? entry.priority : "中";
+      return { priority, title, original, suggested };
+    })
+    .filter((item): item is ResumeSuggestion => item !== null)
+    .slice(0, 5);
+
+  const questionsRaw = Array.isArray(raw.interviewQuestions)
+    ? raw.interviewQuestions
+    : Array.isArray(raw.interview_questions)
+      ? raw.interview_questions
+      : Array.isArray(raw.questions)
+        ? raw.questions
+        : [];
+  const interviewQuestions: InterviewItem[] = questionsRaw
+    .map((item) => {
+      if (item === null || typeof item !== "object") return null;
+      const entry = item as Record<string, unknown>;
+      const question = asString(entry.question, "待补充");
+      const answer = asString(entry.answer, "待补充");
+      if (!question && !answer) return null;
+      return { question, answer: normalizeInterviewAnswer(answer) };
+    })
+    .filter((item): item is InterviewItem => item !== null)
+    .slice(0, 10);
+
   return {
-    ...result,
-    coverLetter: normalizeCoverLetter(result.coverLetter),
-    interviewQuestions: result.interviewQuestions.map((item) => ({
-      ...item,
-      answer: normalizeInterviewAnswer(item.answer),
-    })),
+    score: asBoundedScore(raw.score, 60),
+    summary: asString(raw.summary, "岗位匹配度分析已生成，请结合报告具体内容查看。"),
+    insightTitle: asString(raw.insightTitle, "核心洞察"),
+    insight: asString(raw.insight, "根据简历与岗位描述生成了匹配分析，信息不足处请结合实际情况补充。"),
+    strengths: asStringArray(raw.strengths, 5),
+    gaps: asStringArray(raw.gaps, 4),
+    suggestions,
+    coverLetter: normalizeCoverLetter(asString(raw.coverLetter, "")),
+    interviewQuestions,
   };
 }
 

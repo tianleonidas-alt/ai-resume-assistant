@@ -23,6 +23,57 @@ const supabaseEnabled = Boolean(
   process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY,
 );
 
+async function pollAnalysisStatus(runId: string, onStale?: () => void): Promise<{ result: AnalysisResult; completedAt: string }> {
+  const maxAttempts = 120;
+  const fireBackground = () => {
+    void fetch("/.netlify/functions/analyze-background", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ runId }),
+    }).catch(() => undefined);
+  };
+  const onFocus = () => {
+    if (document.visibilityState !== "hidden") fireBackground();
+  };
+  window.addEventListener("focus", onFocus);
+  document.addEventListener("visibilitychange", onFocus);
+  fireBackground();
+  try {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      if (attempt > 0 && attempt % 10 === 0) fireBackground();
+      const response = await fetch(`/api/analyze/status?runId=${encodeURIComponent(runId)}`, {
+        credentials: "same-origin",
+        cache: "no-store",
+      });
+      const payload = await response.json().catch(() => null) as {
+        status?: string;
+        result?: AnalysisResult;
+        completedAt?: string;
+        error?: string;
+        stale?: boolean;
+      } | null;
+      if (!response.ok || !payload) {
+        throw new Error(payload?.error || "分析状态读取失败，请稍后重试。");
+      }
+      if (payload.status === "completed" && payload.result) {
+        return { result: payload.result, completedAt: payload.completedAt || new Date().toISOString() };
+      }
+      if (payload.status === "failed") {
+        throw new Error(payload.error || "分析未完成，请稍后重试。");
+      }
+      if (payload.stale) {
+        onStale?.();
+        fireBackground();
+      }
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+  } finally {
+    window.removeEventListener("focus", onFocus);
+    document.removeEventListener("visibilitychange", onFocus);
+  }
+  throw new Error("分析耗时过长，请稍后到「我的分析」中查看结果。");
+}
+
 function formatAuthEmailError(error: { message?: string; code?: string } | null) {
   const detail = `${error?.code || ""} ${error?.message || ""}`.toLowerCase();
   if (detail.includes("rate limit") || detail.includes("over_email_send_rate_limit")) {
@@ -57,6 +108,7 @@ export function HomeClient({ initialUser }: { initialUser: AuthenticatedUser | n
   const [authMessage, setAuthMessage] = useState("");
   const [authMessageKind, setAuthMessageKind] = useState<"success" | "error">("success");
   const [authLoading, setAuthLoading] = useState(false);
+  const [statusNote, setStatusNote] = useState("");
 
   useEffect(() => {
     setProvider(readLlmProvider());
@@ -166,7 +218,7 @@ export function HomeClient({ initialUser }: { initialUser: AuthenticatedUser | n
       setLoginOpen(true); setAuthMessage("登录后即可安全保存简历与分析历史。 "); return;
     }
 
-    setStatus("loading"); setError("");
+    setStatus("loading"); setError(""); setStatusNote("");
     try {
       const resumeId = savedResumeId || await saveResume();
       const response = await fetch("/api/analyze", {
@@ -175,9 +227,27 @@ export function HomeClient({ initialUser }: { initialUser: AuthenticatedUser | n
         credentials: "same-origin",
         body: JSON.stringify({ resumeId, jobDescription, provider }),
       });
-      const payload = await response.json() as { result?: AnalysisResult; completedAt?: string; error?: string };
-      if (!response.ok || !payload.result) throw new Error(payload.error || "分析失败");
-      setResult(payload.result); setReportJobTitle(titleFromJobDescription(jobDescription)); setGeneratedAt(payload.completedAt || new Date().toISOString()); setIsDemo(false);
+      const payload = await response.json().catch(() => null) as {
+        runId?: string;
+        status?: string;
+        result?: AnalysisResult;
+        completedAt?: string;
+        error?: string;
+      } | null;
+      if (!payload) throw new Error("服务响应异常，请稍后重试。");
+      if (!response.ok) throw new Error(payload.error || "分析失败");
+
+      if (payload.result) {
+        setResult(payload.result); setReportJobTitle(titleFromJobDescription(jobDescription)); setGeneratedAt(payload.completedAt || new Date().toISOString()); setIsDemo(false);
+        document.querySelector("#report")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        setStatus("ready");
+        return;
+      }
+
+      if (!payload.runId) throw new Error("分析启动失败，请稍后重试。");
+
+      const finished = await pollAnalysisStatus(payload.runId, () => setStatusNote("任务仍在后台排队，请稍候…"));
+      setResult(finished.result); setReportJobTitle(titleFromJobDescription(jobDescription)); setGeneratedAt(finished.completedAt); setIsDemo(false);
       document.querySelector("#report")?.scrollIntoView({ behavior: "smooth", block: "start" });
       setStatus("ready");
     } catch (caught) {
@@ -289,7 +359,7 @@ export function HomeClient({ initialUser }: { initialUser: AuthenticatedUser | n
       <section className="workspace" aria-label="求职材料输入区"><div className="workspace-head"><h2>给我两份材料</h2><span className="step">STEP 01 — 02</span></div><div className="input-grid">
         <article className="input-card"><div className="input-label"><span>你的简历</span><span>PDF</span></div><button className="upload" type="button" onClick={() => inputRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={onDrop}><div><div className="pdf">PDF</div><div className="file">{status === "reading" ? "正在提取简历文字…" : file?.name || "拖拽或点击上传简历"}</div><div className="meta">{file ? `${(file.size / 1024 / 1024).toFixed(1)} MB · 已解析文字` : "支持可选中文本的 PDF · 最大 20 MB"}</div>{status === "ready" && <div className="ready"><i>✓</i>{savedResumeId ? "已安全保存" : "已准备好分析"}</div>}</div></button><input ref={inputRef} type="file" accept="application/pdf,.pdf" onChange={onFileChange} hidden /></article>
         <article className="input-card"><div className="input-label"><span>目标岗位描述{jobDescription === sampleJob && <em className="input-example">举例</em>}</span><span>{jobDescription.length.toLocaleString()} / 3,000</span></div><textarea value={jobDescription} onChange={(event) => setJobDescription(event.target.value)} maxLength={3000} aria-label="岗位描述" /><div className="hint">{jobDescription === sampleJob ? "当前为示例内容，可直接覆盖" : "粘贴完整 JD，分析会更贴近真实招聘要求"}</div></article>
-      </div><div className="action-row"><span className="privacy">{user ? "你的材料仅用于本次分析与个人历史保存" : "登录后可安全保存材料与分析历史"}</span><LlmSelector value={provider} onChange={handleProviderChange} /><button className="analyze" type="button" disabled={!ready || status === "loading"} onClick={() => void analyze()}>{status === "loading" ? "正在深度分析…" : user ? "开始深度分析" : "登录后分析"}<span>→</span></button></div>{error && <p className="error-message" role="alert">{error}</p>}</section>
+      </div><div className="action-row"><span className="privacy">{user ? "你的材料仅用于本次分析与个人历史保存" : "登录后可安全保存材料与分析历史"}</span><LlmSelector value={provider} onChange={handleProviderChange} /><button className="analyze" type="button" disabled={!ready || status === "loading"} onClick={() => void analyze()}>{status === "loading" ? "正在深度分析…" : user ? "开始深度分析" : "登录后分析"}<span>→</span></button></div>{status === "loading" && statusNote && <p className="privacy" role="status">{statusNote}</p>}{error && <p className="error-message" role="alert">{error}</p>}</section>
 
       <AnalysisReport result={result} jobTitle={reportJobTitle} generatedAt={generatedAt} isDemo={isDemo} />
     </main><footer><span>履历 · CAREER INTELLIGENCE</span><span>{user ? "分析结果已安全保存至你的账户" : "登录后保存你的材料与分析历史"}</span></footer>

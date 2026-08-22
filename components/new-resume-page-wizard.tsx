@@ -17,6 +17,50 @@ export type WizardHistoryRun = {
 
 type WizardProps = { history: WizardHistoryRun[] };
 
+async function pollPageGeneration(pageId: string, trigger?: { pageId: string; provider: string; resumeText: string; jobContext?: string }): Promise<void> {
+  const maxAttempts = 120;
+  const fireBackground = () => {
+    if (!trigger) return;
+    void fetch("/.netlify/functions/page-generate-background", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(trigger),
+    }).catch(() => undefined);
+  };
+  const onFocus = () => {
+    if (document.visibilityState !== "hidden") fireBackground();
+  };
+  window.addEventListener("focus", onFocus);
+  document.addEventListener("visibilitychange", onFocus);
+  fireBackground();
+  try {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      if (attempt > 0 && attempt % 10 === 0) fireBackground();
+      const response = await fetch(`/api/resume-pages/${encodeURIComponent(pageId)}`, {
+        credentials: "same-origin",
+        cache: "no-store",
+      });
+      const payload = await response.json().catch(() => null) as {
+        generationStatus?: string;
+        generationError?: string | null;
+        error?: string;
+      } | null;
+      if (!response.ok || !payload) {
+        throw new Error(payload?.error || "读取生成状态失败，请稍后重试。");
+      }
+      if (payload.generationStatus === "completed" || payload.generationStatus === "idle") return;
+      if (payload.generationStatus === "failed") {
+        throw new Error(payload.generationError || "生成失败，请稍后重试。");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+  } finally {
+    window.removeEventListener("focus", onFocus);
+    document.removeEventListener("visibilitychange", onFocus);
+  }
+  throw new Error("生成耗时过长，请稍后到「我的在线页」查看。");
+}
+
 export function NewResumePageWizard({ history }: WizardProps) {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -92,8 +136,13 @@ export function NewResumePageWizard({ history }: WizardProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ resumeId, analysisRunId, jobContext: jobContext.trim() || undefined, provider }),
       });
-      const payload = await response.json().catch(() => null) as { page?: { id: string }; error?: string } | null;
+      const payload = await response.json().catch(() => null) as {
+        page?: { id: string };
+        trigger?: { pageId: string; provider: string; resumeText: string; jobContext?: string };
+        error?: string;
+      } | null;
       if (!response.ok || !payload?.page?.id) throw new Error(payload?.error || "生成失败，请稍后重试。");
+      await pollPageGeneration(payload.page.id, payload.trigger);
       router.push(`/resume-pages/${payload.page.id}`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "生成失败，请稍后重试。");
