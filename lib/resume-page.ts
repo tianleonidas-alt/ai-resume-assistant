@@ -7,10 +7,10 @@ export type ResumePageTheme = {
 };
 
 export const RESUME_PAGE_THEMES: ResumePageTheme[] = [
-  { id: "clean-pro", name: "清爽专业", description: "浅色单栏，深蓝主色，稳妥清晰" },
-  { id: "product-home", name: "产品主页风", description: "大 Hero 与渐变强调，卡片式项目网格" },
-  { id: "creative-portfolio", name: "创意作品集风", description: "纸张质感，高对比强调，编辑排版" },
-  { id: "enterprise-tech", name: "企业科技风", description: "深色科技感，霓虹青点缀，网格秩序" },
+  { id: "clean-pro", name: "清爽专业", description: "双栏简历主页，克制可信，适合传统企业与通用岗位" },
+  { id: "product-home", name: "产品主页风", description: "个人 SaaS 官网风：强 Hero、卖点、案例与行动号召" },
+  { id: "creative-portfolio", name: "创意作品集风", description: "项目为主角的作品集：大卡片、不规则网格与编号分区" },
+  { id: "enterprise-tech", name: "企业科技风", description: "深色系统感：能力矩阵、技术栈与项目指标" },
 ];
 
 export const DEFAULT_RESUME_PAGE_THEME: ResumePageThemeId = "clean-pro";
@@ -22,7 +22,14 @@ export function isResumePageThemeId(value: string): value is ResumePageThemeId {
 export type ResumePageStatus = "draft" | "published";
 
 export type ResumePageHighlight = { title: string; description: string };
-export type ResumePageProject = { name: string; role: string; summary: string; tech: string[]; link: string };
+export type ResumePageProject = {
+  name: string;
+  role: string;
+  summary: string;
+  tech: string[];
+  metrics: string[];
+  link: string;
+};
 export type ResumePageSkillGroup = { category: string; items: string[] };
 export type ResumePageSocial = { label: string; url: string };
 
@@ -107,6 +114,7 @@ function mapProject(value: unknown): ResumePageProject | null {
     role,
     summary,
     tech: stringArray(record.tech, 8, 30),
+    metrics: stringArray(record.metrics, 5, 40),
     link: clampString(record.link, 300),
   };
 }

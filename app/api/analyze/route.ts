@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { normalizeAnalysisResult, type AnalysisResult } from "@/lib/analysis";
+import { getLlmProvider, isLlmProvider, type LlmProvider } from "@/lib/llm";
+import { runChatCompletion } from "@/lib/llm-server";
 import { createAdminSupabaseClient } from "@/lib/supabase/admin";
 import { getAuthenticatedRequestUser } from "@/lib/supabase/request-user";
 
@@ -44,14 +46,21 @@ export async function POST(request: Request) {
     const user = await getAuthenticatedRequestUser(request);
     if (!user) return publicError("请先登录后再开始分析。", 401);
 
-    const { resumeId, jobDescription } = await request.json() as { resumeId?: string; jobDescription?: string };
+    const { resumeId, jobDescription, provider: providerInput } = await request.json() as {
+      resumeId?: string;
+      jobDescription?: string;
+      provider?: string;
+    };
     const cleanJobDescription = jobDescription?.trim() || "";
     if (!resumeId || cleanJobDescription.length < 20 || cleanJobDescription.length > 20000) {
       return publicError("请上传简历并填写 20–20,000 字的完整岗位描述。", 400);
     }
-    if (!process.env.DEEPSEEK_API_KEY) {
-      return publicError("服务端尚未配置 DEEPSEEK_API_KEY，请先在 .env.local 中设置。", 503);
-    }
+    const providerRaw = typeof providerInput === "string" ? providerInput : "";
+    const provider: LlmProvider = isLlmProvider(providerRaw) ? providerRaw : "deepseek";
+    const providerConfig = getLlmProvider(provider);
+    if (!providerConfig) return publicError("不支持的模型提供方。", 400);
+    const model = process.env[providerConfig.modelEnv] || providerConfig.defaultModel;
+    const modelKey = `${provider}:${model}`;
 
     admin = createAdminSupabaseClient();
     const { data: resume, error: resumeError } = await admin
@@ -72,14 +81,13 @@ export async function POST(request: Request) {
     if (jobError) throw jobError;
 
     runId = crypto.randomUUID();
-    const model = process.env.DEEPSEEK_MODEL || "deepseek-v4-flash";
     const { error: runError } = await admin.from("analysis_runs").insert({
       id: runId,
       user_id: user.id,
       resume_id: resume.id,
       job_description_id: jobDescriptionId,
       status: "processing",
-      model,
+      model: modelKey,
       input_snapshot: { resume_text: resume.parsed_text, job_description: cleanJobDescription },
       started_at: new Date().toISOString(),
     });
@@ -91,32 +99,16 @@ export async function POST(request: Request) {
       event_type: "analysis_requested",
     });
 
-    const baseUrl = (process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com").replace(/\/$/, "");
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.DEEPSEEK_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model,
-        temperature: 0.45,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: `【简历文本】\n${resume.parsed_text.slice(0, 18000)}\n\n【目标岗位描述】\n${cleanJobDescription.slice(0, 12000)}` },
-        ],
-      }),
+    const { content } = await runChatCompletion({
+      provider,
+      model,
+      temperature: 0.45,
+      json: true,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: `【简历文本】\n${resume.parsed_text.slice(0, 18000)}\n\n【目标岗位描述】\n${cleanJobDescription.slice(0, 12000)}` },
+      ],
     });
-
-    if (!response.ok) {
-      console.error("DeepSeek API error", response.status, await response.text());
-      throw new Error("DeepSeek API 暂时不可用或密钥无效，请检查配置后重试。");
-    }
-
-    const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-    const content = data.choices?.[0]?.message?.content;
-    if (!content) throw new Error("AI 返回内容为空。");
     const result = normalizeAnalysisResult(readJson(content));
 
     const { error: resultError } = await admin.from("analysis_results").insert({

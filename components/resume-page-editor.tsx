@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { readLlmProvider } from "@/components/llm-selector";
 import {
   RESUME_PAGE_THEMES,
   normalizeResumePageContent,
@@ -114,6 +115,7 @@ export function ResumePageEditor({ page: initial }: { page: ResumePageDTO }) {
         body: JSON.stringify({
           resumeId: initial.sourceResumeId,
           analysisRunId: initial.sourceAnalysisRunId,
+          provider: readLlmProvider(),
         }),
       });
       const payload = await response.json() as { page?: ResumePageDTO; error?: string };
@@ -272,10 +274,11 @@ export function ResumePageEditor({ page: initial }: { page: ResumePageDTO }) {
                 <Field label="担任角色"><input value={item.role} onChange={(event) => updateProject(index, { role: event.target.value })} maxLength={40} /></Field>
                 <Field label="成果描述"><textarea rows={3} value={item.summary} onChange={(event) => updateProject(index, { summary: event.target.value })} maxLength={500} /></Field>
                 <Field label="技术/关键词（、分隔）"><input value={item.tech.join("、")} onChange={(event) => updateProject(index, { tech: splitList(event.target.value) })} /></Field>
+                <Field label="量化指标（、分隔）"><input value={item.metrics.join("、")} onChange={(event) => updateProject(index, { metrics: splitList(event.target.value) })} placeholder="如：转化率 +18%" /></Field>
                 <Field label="链接（可选）"><input value={item.link} onChange={(event) => updateProject(index, { link: event.target.value })} maxLength={300} placeholder="https://…" /></Field>
               </div>
             ))}
-            <button type="button" className="editor-add" onClick={() => setContent((prev) => normalizeResumePageContent({ ...prev, projects: [...prev.projects, { name: "", role: "", summary: "", tech: [], link: "" }] }))}>+ 添加项目</button>
+            <button type="button" className="editor-add" onClick={() => setContent((prev) => normalizeResumePageContent({ ...prev, projects: [...prev.projects, { name: "", role: "", summary: "", tech: [], metrics: [], link: "" }] }))}>+ 添加项目</button>
           </EditorCard>
 
           <EditorCard title="技能">

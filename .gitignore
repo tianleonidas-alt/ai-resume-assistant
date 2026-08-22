@@ -15,3 +15,6 @@ deno.lock
 # Design archive and assignment screenshots (not part of the app source)
 static-preview.html
 作业文档/
+
+# Supabase CLI local state
+supabase/.temp/

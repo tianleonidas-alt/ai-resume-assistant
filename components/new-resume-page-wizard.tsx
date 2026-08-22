@@ -1,7 +1,9 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { DragEvent, ChangeEvent, useRef, useState } from "react";
+import { DragEvent, ChangeEvent, useEffect, useRef, useState } from "react";
+import { LlmSelector, readLlmProvider, writeLlmProvider } from "@/components/llm-selector";
+import type { LlmProvider } from "@/lib/llm";
 import { extractPdfText } from "@/lib/pdf";
 
 export type WizardHistoryRun = {
@@ -24,8 +26,18 @@ export function NewResumePageWizard({ history }: WizardProps) {
   const [pdfStatus, setPdfStatus] = useState<"idle" | "reading" | "ready" | "error">("idle");
   const [jobContext, setJobContext] = useState("");
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
+  const [provider, setProvider] = useState<LlmProvider>("deepseek");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    setProvider(readLlmProvider());
+  }, []);
+
+  function handleProviderChange(value: LlmProvider) {
+    setProvider(value);
+    writeLlmProvider(value);
+  }
 
   async function handleFile(selected: File) {
     if (selected.type !== "application/pdf" && !selected.name.toLowerCase().endsWith(".pdf")) {
@@ -78,7 +90,7 @@ export function NewResumePageWizard({ history }: WizardProps) {
       const response = await fetch("/api/resume-pages/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ resumeId, analysisRunId, jobContext: jobContext.trim() || undefined }),
+        body: JSON.stringify({ resumeId, analysisRunId, jobContext: jobContext.trim() || undefined, provider }),
       });
       const payload = await response.json().catch(() => null) as { page?: { id: string }; error?: string } | null;
       if (!response.ok || !payload?.page?.id) throw new Error(payload?.error || "生成失败，请稍后重试。");
@@ -137,6 +149,7 @@ export function NewResumePageWizard({ history }: WizardProps) {
       {error && <p className="error-message" role="alert">{error}</p>}
       <div className="wizard-action">
         <span className="privacy">生成结果默认保存为草稿，仅你可见；发布后才生成公开链接。</span>
+        <LlmSelector value={provider} onChange={handleProviderChange} />
         <button className="analyze" type="button" disabled={!ready || busy} onClick={() => void generate()}>
           {busy ? "AI 正在组织内容…" : "AI 生成在线简历页"}<span>→</span>
         </button>
