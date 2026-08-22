@@ -2,10 +2,12 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ChangeEvent, DragEvent, FormEvent, type CSSProperties, useEffect, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, FormEvent, useEffect, useRef, useState } from "react";
 import type { User } from "@supabase/supabase-js";
-import { demoResult, type AnalysisResult } from "@/lib/analysis";
+import { demoResult, titleFromJobDescription, type AnalysisResult } from "@/lib/analysis";
+import { deleteAnalysisDraft, readAnalysisDraft, writeAnalysisDraft } from "@/lib/analysis-draft";
 import { createBrowserSupabaseClient } from "@/lib/supabase/client";
+import { AnalysisReport } from "@/components/analysis-report";
 
 type AuthenticatedUser = Pick<User, "id" | "email">;
 
@@ -18,11 +20,6 @@ const sampleJob = `高级产品经理｜杭州
 const supabaseEnabled = Boolean(
   process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY,
 );
-
-function Score({ score }: { score: number }) {
-  const style = { "--score": `${Math.min(100, Math.max(0, score))}%` } as CSSProperties;
-  return <div className="score" style={style}><div><b>{score}</b><small>/ 100</small></div></div>;
-}
 
 function formatAuthEmailError(error: { message?: string; code?: string } | null) {
   const detail = `${error?.code || ""} ${error?.message || ""}`.toLowerCase();
@@ -43,7 +40,12 @@ export default function Home() {
   const [error, setError] = useState("");
   const [result, setResult] = useState<AnalysisResult>(demoResult);
   const [isDemo, setIsDemo] = useState(true);
+  const [reportJobTitle, setReportJobTitle] = useState("高级产品经理");
+  const [generatedAt, setGeneratedAt] = useState(() => new Date().toISOString());
   const [user, setUser] = useState<AuthenticatedUser | null>(null);
+  const [authLoaded, setAuthLoaded] = useState(!supabaseEnabled);
+  const [draftLoaded, setDraftLoaded] = useState(false);
+  const [loadedDraftKey, setLoadedDraftKey] = useState<string | null>(null);
   const [loginOpen, setLoginOpen] = useState(false);
   const [authMode, setAuthMode] = useState<"signIn" | "signUp" | "forgot">("signIn");
   const [email, setEmail] = useState("");
@@ -58,7 +60,8 @@ export default function Home() {
     void fetch("/api/auth/session", { credentials: "same-origin", cache: "no-store" })
       .then(async (response) => response.ok ? await response.json() as { user: AuthenticatedUser } : { user: null })
       .then((payload) => setUser(payload.user))
-      .catch(() => setUser(null));
+      .catch(() => setUser(null))
+      .finally(() => setAuthLoaded(true));
     const authState = new URLSearchParams(window.location.search).get("auth");
     if (authState === "error") {
       setLoginOpen(true);
@@ -74,6 +77,38 @@ export default function Home() {
       setAuthMessage("密码已更新，请使用新密码登录。 ");
     }
   }, []);
+
+  const draftKey = user ? `user:${user.id}` : "guest";
+
+  useEffect(() => {
+    if (!authLoaded) return;
+    let active = true;
+    setDraftLoaded(false);
+    setLoadedDraftKey(null);
+    void readAnalysisDraft(draftKey)
+      .then((draft) => {
+        if (!active || !draft) return;
+        setFile(draft.file);
+        setResumeText(draft.resumeText);
+        setSavedResumeId(draft.savedResumeId);
+        setJobDescription(draft.jobDescription);
+        setStatus(draft.file && draft.resumeText ? "ready" : "idle");
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (active) { setLoadedDraftKey(draftKey); setDraftLoaded(true); }
+      });
+    return () => { active = false; };
+  }, [authLoaded, draftKey]);
+
+  useEffect(() => {
+    if (!draftLoaded || loadedDraftKey !== draftKey) return;
+    const hasDraft = Boolean(file || resumeText || savedResumeId || jobDescription !== sampleJob);
+    const action = hasDraft
+      ? writeAnalysisDraft(draftKey, { file, resumeText, savedResumeId, jobDescription })
+      : deleteAnalysisDraft(draftKey);
+    void action.catch(() => undefined);
+  }, [draftLoaded, loadedDraftKey, draftKey, file, resumeText, savedResumeId, jobDescription]);
 
   async function extractPdf(selected: File) {
     if (selected.type !== "application/pdf" && !selected.name.toLowerCase().endsWith(".pdf")) {
@@ -142,9 +177,9 @@ export default function Home() {
         credentials: "same-origin",
         body: JSON.stringify({ resumeId, jobDescription }),
       });
-      const payload = await response.json() as { result?: AnalysisResult; error?: string };
+      const payload = await response.json() as { result?: AnalysisResult; completedAt?: string; error?: string };
       if (!response.ok || !payload.result) throw new Error(payload.error || "分析失败");
-      setResult(payload.result); setIsDemo(false);
+      setResult(payload.result); setReportJobTitle(titleFromJobDescription(jobDescription)); setGeneratedAt(payload.completedAt || new Date().toISOString()); setIsDemo(false);
       document.querySelector("#report")?.scrollIntoView({ behavior: "smooth", block: "start" });
       setStatus("ready");
     } catch (caught) {
@@ -194,6 +229,7 @@ export default function Home() {
         return;
       }
       setUser(payload.user);
+      void deleteAnalysisDraft("guest").catch(() => undefined);
       setPassword(""); setConfirmPassword("");
       setLoginOpen(false);
       router.refresh();
@@ -227,6 +263,7 @@ export default function Home() {
       return;
     }
     setUser(payload.user);
+    void deleteAnalysisDraft("guest").catch(() => undefined);
     setPassword("");
     setLoginOpen(false);
     router.refresh();
@@ -235,7 +272,7 @@ export default function Home() {
   async function signOut() {
     if (!supabaseEnabled) return;
     await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
-    setUser(null); setSavedResumeId(null);
+    setUser(null); setFile(null); setResumeText(""); setSavedResumeId(null); setJobDescription(sampleJob); setStatus("idle");
     router.refresh();
   }
 
@@ -244,18 +281,14 @@ export default function Home() {
 
   return <div className="shell">
     <nav className="nav"><div className="brand"><span className="mark">履</span><b>履历</b><small>CAREER INTELLIGENCE</small></div><div className="nav-actions">{user ? <><Link className="history-link" href="/history">我的分析</Link><button className="account-button" type="button" onClick={() => void signOut()} title="退出登录">{accountLabel}<span>退出</span></button></> : <button className="login-button" type="button" onClick={() => openAuth("signIn")}>登录并保存</button>}<div className="nav-note"><i>●</i> 让每一次投递，更接近理想工作</div></div></nav>
-    <header className="hero"><div><div className="eyebrow">THE CAREER EDITOR / 01</div><h1>把经验，写成<br />值得被看见的<em>机会。</em></h1><p>上传你的履历，告诉我们你向往的岗位。我们将用一份清晰、诚实而有说服力的职业叙事，帮你走近下一次面试。</p></div><aside><b>从简历到回音</b><p>定位匹配 · 打磨表达 ·<br />为下一场对话做好准备</p></aside></header>
+    <header className="hero"><div><div className="eyebrow">THE CAREER EDITOR / 01</div><h1>把经验，写成值得被看见的<em>机会。</em></h1></div><div className="hero-details"><p>上传你的履历，告诉我们你向往的岗位。我们将用一份清晰、诚实而有说服力的职业叙事，帮你走近下一次面试。</p><aside><b>从简历到回音</b><p>定位匹配 · 打磨表达 ·<br />为下一场对话做好准备</p></aside></div></header>
     <main>
       <section className="workspace" aria-label="求职材料输入区"><div className="workspace-head"><h2>给我两份材料</h2><span className="step">STEP 01 — 02</span></div><div className="input-grid">
         <article className="input-card"><div className="input-label"><span>你的简历</span><span>PDF</span></div><button className="upload" type="button" onClick={() => inputRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={onDrop}><div><div className="pdf">PDF</div><div className="file">{status === "reading" ? "正在提取简历文字…" : file?.name || "拖拽或点击上传简历"}</div><div className="meta">{file ? `${(file.size / 1024 / 1024).toFixed(1)} MB · 已解析文字` : "支持可选中文本的 PDF · 最大 20 MB"}</div>{status === "ready" && <div className="ready"><i>✓</i>{savedResumeId ? "已安全保存" : "已准备好分析"}</div>}</div></button><input ref={inputRef} type="file" accept="application/pdf,.pdf" onChange={onFileChange} hidden /></article>
-        <article className="input-card"><div className="input-label"><span>目标岗位描述</span><span>{jobDescription.length.toLocaleString()} / 3,000</span></div><textarea value={jobDescription} onChange={(event) => setJobDescription(event.target.value)} maxLength={3000} aria-label="岗位描述" /><div className="hint">粘贴完整 JD，分析会更贴近真实招聘要求</div></article>
+        <article className="input-card"><div className="input-label"><span>目标岗位描述{jobDescription === sampleJob && <em className="input-example">举例</em>}</span><span>{jobDescription.length.toLocaleString()} / 3,000</span></div><textarea value={jobDescription} onChange={(event) => setJobDescription(event.target.value)} maxLength={3000} aria-label="岗位描述" /><div className="hint">{jobDescription === sampleJob ? "当前为示例内容，可直接覆盖" : "粘贴完整 JD，分析会更贴近真实招聘要求"}</div></article>
       </div><div className="action-row"><span className="privacy">{user ? "你的材料仅用于本次分析与个人历史保存" : "登录后可安全保存材料与分析历史"}</span><button className="analyze" type="button" disabled={!ready || status === "loading"} onClick={() => void analyze()}>{status === "loading" ? "正在深度分析…" : user ? "开始深度分析" : "登录后分析"}<span>→</span></button></div>{error && <p className="error-message" role="alert">{error}</p>}</section>
 
-      <section className="report" id="report"><div className="report-top"><div><div className="section-no">02 / YOUR CAREER BRIEF</div><h2>为「高级产品经理」准备的<br />一份更有力的表达。</h2></div><span className="date">{isDemo ? "ANALYSIS SAMPLE · 2026.08" : "AI ANALYSIS · JUST NOW"}</span></div>
-        <section className="match"><div className="score-panel"><div><div className="section-no">01 / MATCH ANALYSIS</div><h3>岗位匹配度</h3><div className="score-wrap"><Score score={result.score} /><p className="score-note">{result.summary}</p></div></div><p className="score-foot">与你的目标岗位相比，核心能力项已覆盖 {Math.min(9, Math.max(1, Math.round(result.score / 11)))} / 9。</p></div><div className="match-copy"><div className="section-no">02 / WHAT WE SEE</div><h3>{result.insightTitle}</h3><p>{result.insight}</p><div className="tags">{result.strengths.map((item) => <span className="tag good" key={item}>{item}</span>)}{result.gaps.map((item) => <span className="tag gap" key={item}>{item}</span>)}</div></div></section>
-        <div className="lower"><section className="advice"><header className="panel-head"><div><div className="section-no">03 / RESUME EDIT</div><h3>简历优化建议</h3></div><span className="priority">{result.suggestions.length} 项优先修改</span></header>{result.suggestions.map((item, index) => <div className="advice-item" key={`${item.title}-${index}`}><b>{String(index + 1).padStart(2, "0")}　{item.title}</b><div className="original">{item.original}</div><div className="improved"><span>建议：</span>{item.suggested}</div></div>)}</section><div className="stack"><section className="letter"><header className="panel-head"><div><div className="section-no">04 / COVER LETTER</div><h3>为你写一封信</h3></div><button className="copy" type="button" onClick={() => void navigator.clipboard.writeText(result.coverLetter)}>可复制</button></header><div className="letter-body">{result.coverLetter.split("\n").map((line, index) => line ? <p key={index}>{line}</p> : <br key={index} />)}</div></section></div></div>
-        <section className="questions"><header className="panel-head"><div><div className="section-no">05 / INTERVIEW PREP</div><h3>带着答案，走进面试。</h3></div><span className="priority">10 个高概率问题</span></header><p className="intro">围绕岗位最看重的能力，提前组织属于你的真实故事。</p><div className="question-grid">{result.interviewQuestions.map((item, index) => <article className="question" key={`${item.question}-${index}`}><span className="q-num">{String(index + 1).padStart(2, "0")}</span><h4>{item.question}</h4><p><b>参考：</b>{item.answer}</p></article>)}</div></section>
-      </section>
+      <AnalysisReport result={result} jobTitle={reportJobTitle} generatedAt={generatedAt} isDemo={isDemo} />
     </main><footer><span>履历 · CAREER INTELLIGENCE</span><span>{user ? "分析结果已安全保存至你的账户" : "登录后保存你的材料与分析历史"}</span></footer>
 
     {loginOpen && <div className="auth-backdrop" role="presentation" onMouseDown={() => setLoginOpen(false)}><section className="auth-dialog" role="dialog" aria-modal="true" aria-labelledby="auth-title" onMouseDown={(event) => event.stopPropagation()}><button className="dialog-close" type="button" onClick={() => setLoginOpen(false)} aria-label="关闭">×</button><div className="section-no">ACCOUNT ACCESS</div><h2 id="auth-title">{authMode === "signUp" ? <>为下一次机会，<br />建立你的档案。</> : authMode === "forgot" ? <>重新设置，<br />继续向前。</> : <>把每一份努力，<br />妥善保存。</>}</h2><p>{authMode === "signUp" ? "创建账户后即可开始分析。你的求职材料与分析结果将只保存在个人账户中。" : authMode === "forgot" ? "输入你的注册邮箱。若账户存在，我们会发送安全的密码重设链接。" : "登录后，简历、岗位材料与分析结果只会保存在你的个人账户中。"}</p><div className="auth-tabs" role="tablist" aria-label="账户操作"><button type="button" role="tab" aria-selected={authMode === "signIn"} className={authMode === "signIn" ? "active" : ""} onClick={() => openAuth("signIn")}>登录</button><button type="button" role="tab" aria-selected={authMode === "signUp"} className={authMode === "signUp" ? "active" : ""} onClick={() => openAuth("signUp")}>注册</button></div><form onSubmit={(event) => void handleAuthSubmit(event)}><label htmlFor="email">邮箱地址</label><input id="email" type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" />{authMode !== "forgot" && <><label htmlFor="password">密码</label><input id="password" type="password" autoComplete={authMode === "signUp" ? "new-password" : "current-password"} required minLength={8} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="至少 8 位" />{authMode === "signUp" && <><label htmlFor="confirm-password">确认密码</label><input id="confirm-password" type="password" autoComplete="new-password" required minLength={8} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="再次输入密码" /></>}</>}<button className="auth-submit" type="submit" disabled={authLoading}>{authLoading ? "正在处理…" : authMode === "signUp" ? "创建账户并继续 →" : authMode === "forgot" ? "发送重设链接 →" : "登录并继续 →"}</button></form>{authMode === "signIn" && <button className="auth-inline-action" type="button" onClick={() => openAuth("forgot")}>忘记密码？</button>}{authMode === "forgot" && <button className="auth-inline-action" type="button" onClick={() => openAuth("signIn")}>返回登录</button>}{authMessage && <p className={`auth-message ${authMessageKind === "error" ? "error" : ""}`} role="status">{authMessage}</p>}<small>{authMode === "signUp" ? "无需邮箱确认，注册后可直接使用邮箱和密码登录。" : authMode === "forgot" ? "重设链接将发送至你的注册邮箱。" : "还没有账户？请选择“注册”创建一个。"}</small></section></div>}

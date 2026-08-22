@@ -22,6 +22,58 @@ export type AnalysisResult = {
   interviewQuestions: InterviewItem[];
 };
 
+const standaloneDateLine = /^(?:日期\s*[：:]\s*)?(?:(?:19|20)\d{2}\s*[年./-]\s*)?\d{1,2}\s*(?:月|[./-])\s*\d{1,2}\s*(?:日)?\s*$/;
+const referencePrefix = /^(?:参考(?:回答|答案|要点)?|回答(?:要点)?|答)[：:\s]*/i;
+
+/** Remove model-added labels so the UI owns the visual "参考：" prefix. */
+export function normalizeInterviewAnswer(answer: string) {
+  return answer.trim().replace(referencePrefix, "").trim();
+}
+
+/**
+ * Dates belong to the task metadata, rather than model prose. Removing only
+ * standalone date lines preserves legitimate dates in the body of a letter.
+ */
+export function normalizeCoverLetter(coverLetter: string) {
+  return coverLetter
+    .split("\n")
+    .filter((line) => !standaloneDateLine.test(line.trim()))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+export function normalizeAnalysisResult(result: AnalysisResult): AnalysisResult {
+  return {
+    ...result,
+    coverLetter: normalizeCoverLetter(result.coverLetter),
+    interviewQuestions: result.interviewQuestions.map((item) => ({
+      ...item,
+      answer: normalizeInterviewAnswer(item.answer),
+    })),
+  };
+}
+
+export function titleFromJobDescription(jobDescription: string) {
+  const firstLine = jobDescription.split("\n").map((line) => line.trim()).find(Boolean) || "目标岗位";
+  return firstLine.split(/[｜|—–-]/)[0].trim().slice(0, 120) || "目标岗位";
+}
+
+export function formatChinaDate(value: string | Date) {
+  const parts = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+  }).formatToParts(new Date(value));
+  const read = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value || "";
+  return `${read("year")} 年 ${read("month")} 月 ${read("day")} 日`;
+}
+
+export function formatCoverLetterForCopy(coverLetter: string, generatedAt: string | Date) {
+  return `${normalizeCoverLetter(coverLetter)}\n\n${formatChinaDate(generatedAt)}`;
+}
+
 export const demoResult: AnalysisResult = {
   score: 78,
   summary: "已经具备扎实基础，重点是让增长成果更有说服力。",

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import type { AnalysisResult } from "@/lib/analysis";
+import { normalizeAnalysisResult, type AnalysisResult } from "@/lib/analysis";
 import { createAdminSupabaseClient } from "@/lib/supabase/admin";
 import { getAuthenticatedRequestUser } from "@/lib/supabase/request-user";
 
@@ -14,10 +14,10 @@ const systemPrompt = `你是一位资深中文职业顾问。根据用户简历�
   "strengths": ["最多 5 个优势关键词"],
   "gaps": ["最多 4 个待补足关键词"],
   "suggestions": [{"priority":"高|中|低","title":"建议标题","original":"简历中可替换的原表述或概括","suggested":"可直接参考的改写"}],
-  "coverLetter": "完整中文求职信，含称呼与落款，约 300-500 字",
-  "interviewQuestions": [{"question":"问题","answer":"参考回答要点"}]
+  "coverLetter": "完整中文求职信正文，含称呼与署名、不得含任何日期，约 300-500 字",
+  "interviewQuestions": [{"question":"问题","answer":"回答要点正文，不得包含‘参考’、‘参考回答’等前缀"}]
 }
-suggestions 输出 3 条；interviewQuestions 严格输出 10 条。不要编造简历中没有的事实或数字；若信息不足，请在建议中明确标记待补充。`;
+suggestions 输出 3 条；interviewQuestions 严格输出 10 条。求职信的日期由系统统一添加，绝不能输出年份、月日或“日期”字段。不要编造简历中没有的事实或数字；若信息不足，请在建议中明确标记待补充。`;
 
 function readJson(content: string): AnalysisResult {
   const cleaned = content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
@@ -117,7 +117,7 @@ export async function POST(request: Request) {
     const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
     const content = data.choices?.[0]?.message?.content;
     if (!content) throw new Error("AI 返回内容为空。");
-    const result = readJson(content);
+    const result = normalizeAnalysisResult(readJson(content));
 
     const { error: resultError } = await admin.from("analysis_results").insert({
       analysis_run_id: runId,
@@ -141,7 +141,7 @@ export async function POST(request: Request) {
       event_type: "analysis_completed",
     });
 
-    return NextResponse.json({ result, runId });
+    return NextResponse.json({ result, runId, completedAt });
   } catch (error) {
     console.error("Analysis failed", error);
     if (runId && admin) {

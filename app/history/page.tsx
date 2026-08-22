@@ -41,7 +41,7 @@ export default async function HistoryPage() {
     <header className="history-header"><div className="section-no">YOUR PERSONAL ARCHIVE</div><h1>每一次认真准备，<br />都有迹可循。</h1><p>这里保存你专属的岗位分析记录。简历和结果仅对你的账户可见。</p></header>
     {error ? <p className="history-error">历史记录暂时无法读取，请稍后重试。</p> : items.length ? <section className="history-list">{items.map((item) => {
       const score = item.analysis_results?.score;
-      return <article className="history-card" key={item.id}><div><div className="section-no">{item.status === "completed" ? "ANALYSIS COMPLETE" : "ANALYSIS STATUS"}</div><h2>{item.job_descriptions?.job_title || "目标岗位"}</h2><p>{item.job_descriptions?.company_name || "未填写公司"} · {formatDate(item.created_at)}</p></div><div className="history-score">{typeof score === "number" ? <><b>{score}</b><small>/ 100</small></> : <span>{item.status === "failed" ? "未完成" : "处理中"}</span>}</div></article>;
+      return <Link className="history-card" href={`/history/${item.id}`} key={item.id}><div><div className="section-no">{item.status === "completed" ? "ANALYSIS COMPLETE" : "ANALYSIS STATUS"}</div><h2>{item.job_descriptions?.job_title || "目标岗位"}</h2><p>{item.job_descriptions?.company_name || "未填写公司"} · {formatDate(item.created_at)}</p></div><div className="history-score">{typeof score === "number" ? <><b>{score}</b><small>/ 100</small></> : <span>{item.status === "failed" ? "未完成" : "处理中"}</span>}</div></Link>;
     })}</section> : <section className="history-empty"><div className="section-no">FIRST RECORD</div><h2>你的分析档案，<br />会从第一次投递开始。</h2><p>上传简历并完成一次岗位分析后，记录会出现在这里。</p><Link href="/" className="history-cta">去开始分析 →</Link></section>}
   </main>;
 }
