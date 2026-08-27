@@ -5,6 +5,8 @@ import { DragEvent, ChangeEvent, useEffect, useRef, useState } from "react";
 import { LlmSelector, readLlmProvider, writeLlmProvider } from "@/components/llm-selector";
 import type { LlmProvider } from "@/lib/llm";
 import { extractPdfText } from "@/lib/pdf";
+import { SiteNav } from "@/components/site-nav";
+import { CreditConfirmDialog } from "@/components/credit-confirm";
 
 export type WizardHistoryRun = {
   id: string;
@@ -58,7 +60,7 @@ async function pollPageGeneration(pageId: string, trigger?: { pageId: string; pr
     window.removeEventListener("focus", onFocus);
     document.removeEventListener("visibilitychange", onFocus);
   }
-  throw new Error("生成耗时过长，请稍后到「我的在线页」查看。");
+  throw new Error("生成耗时过长，请稍后到「我的在线简历」查看。");
 }
 
 export function NewResumePageWizard({ history }: WizardProps) {
@@ -73,6 +75,8 @@ export function NewResumePageWizard({ history }: WizardProps) {
   const [provider, setProvider] = useState<LlmProvider>("deepseek");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmBalance, setConfirmBalance] = useState(0);
 
   useEffect(() => {
     setProvider(readLlmProvider());
@@ -143,18 +147,47 @@ export function NewResumePageWizard({ history }: WizardProps) {
       } | null;
       if (!response.ok || !payload?.page?.id) throw new Error(payload?.error || "生成失败，请稍后重试。");
       await pollPageGeneration(payload.page.id, payload.trigger);
+      window.dispatchEvent(new Event("credits:refresh"));
       router.push(`/resume-pages/${payload.page.id}`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "生成失败，请稍后重试。");
+      window.dispatchEvent(new Event("credits:refresh"));
       setBusy(false);
     }
+  }
+
+  function beginGenerate() {
+    if (!ready) return;
+    if (mode === "history") {
+      void generate();
+      return;
+    }
+    void (async () => {
+      try {
+        const response = await fetch("/api/billing/balance", { credentials: "same-origin", cache: "no-store" });
+        const payload = response.ok ? await response.json() : null;
+        if (payload?.billingEnabled) {
+          if (payload.balance < 1) {
+            setError("可用次数不足，请先充值后继续。");
+            router.push("/credits");
+            return;
+          }
+          setConfirmBalance(payload.balance);
+          setConfirmOpen(true);
+          return;
+        }
+        void generate();
+      } catch {
+        void generate();
+      }
+    })();
   }
 
   const ready = mode === "pdf" ? pdfStatus === "ready" : Boolean(selectedRun);
 
   return (
     <div className="wizard-shell">
-      <nav className="wizard-nav"><span>履历 · NEW RESUME PAGE</span></nav>
+      <SiteNav />
       <header className="wizard-header">
         <div className="section-no">CREATE YOUR PAGE</div>
         <h1>从一份简历，<br />长出一个<em>主页。</em></h1>
@@ -199,10 +232,17 @@ export function NewResumePageWizard({ history }: WizardProps) {
       <div className="wizard-action">
         <span className="privacy">生成结果默认保存为草稿，仅你可见；发布后才生成公开链接。</span>
         <LlmSelector value={provider} onChange={handleProviderChange} />
-        <button className="analyze" type="button" disabled={!ready || busy} onClick={() => void generate()}>
+        <button className="analyze" type="button" disabled={!ready || busy} onClick={() => beginGenerate()}>
           {busy ? "AI 正在组织内容…" : "AI 生成在线简历页"}<span>→</span>
         </button>
       </div>
+      <CreditConfirmDialog
+        open={confirmOpen}
+        balance={confirmBalance}
+        note={`上传 PDF 直接生成在线简历页将消耗 1 点（免费额度优先）。当前可用 ${confirmBalance} 点。`}
+        onConfirm={() => { setConfirmOpen(false); void generate(); }}
+        onCancel={() => setConfirmOpen(false)}
+      />
     </div>
   );
 }

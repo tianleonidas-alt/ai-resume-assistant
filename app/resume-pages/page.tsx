@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { AuthGate } from "@/components/auth-gate";
+import { SiteNav } from "@/components/site-nav";
 import { RESUME_PAGE_THEMES, mapResumePageRow, publicResumePageUrl, type ResumePageDTO } from "@/lib/resume-page";
 import { hasPublicSupabaseConfig } from "@/lib/supabase/config";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
@@ -23,7 +24,7 @@ export default async function ResumePagesPage() {
   const { data: claimsData, error: claimsError } = await supabase.auth.getClaims();
   const userId = typeof claimsData?.claims?.sub === "string" ? claimsData.claims.sub : null;
   if (claimsError || !userId) {
-    return <main className="pages-shell"><AuthGate message="登录后即可创建、管理你的在线简历页。" /></main>;
+    return <main className="pages-shell"><SiteNav /><AuthGate message="登录后即可创建、管理你的在线简历页。" /></main>;
   }
 
   const { data, error } = await supabase
@@ -36,7 +37,7 @@ export default async function ResumePagesPage() {
   const pages = (data || []).map((row) => mapResumePageRow(row as Record<string, unknown>));
 
   return <main className="pages-shell">
-    <nav className="pages-nav"><Link href="/" className="back-link">← 返回分析页</Link><span>履历 · RESUME PAGES</span></nav>
+    <SiteNav />
     <header className="pages-header">
       <div className="section-no">YOUR PUBLIC PAGES</div>
       <h1>把经历，变成<br />可分享的<em>主页。</em></h1>

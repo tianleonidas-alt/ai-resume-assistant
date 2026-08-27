@@ -10,6 +10,8 @@ import type { LlmProvider } from "@/lib/llm";
 import { extractPdfText } from "@/lib/pdf";
 import { createBrowserSupabaseClient } from "@/lib/supabase/client";
 import { AnalysisReport } from "@/components/analysis-report";
+import { SiteNav } from "@/components/site-nav";
+import { CreditConfirmDialog } from "@/components/credit-confirm";
 
 type AuthenticatedUser = { id: string; email: string | null };
 
@@ -71,7 +73,7 @@ async function pollAnalysisStatus(runId: string, onStale?: () => void): Promise<
     window.removeEventListener("focus", onFocus);
     document.removeEventListener("visibilitychange", onFocus);
   }
-  throw new Error("分析耗时过长，请稍后到「我的分析」中查看结果。");
+  throw new Error("分析耗时过长，请稍后到「历史分析结果」中查看结果。");
 }
 
 function formatAuthEmailError(error: { message?: string; code?: string } | null) {
@@ -109,6 +111,8 @@ export function HomeClient({ initialUser }: { initialUser: AuthenticatedUser | n
   const [authMessageKind, setAuthMessageKind] = useState<"success" | "error">("success");
   const [authLoading, setAuthLoading] = useState(false);
   const [statusNote, setStatusNote] = useState("");
+  const [creditState, setCreditState] = useState<{ billingEnabled: boolean; balance: number; freeRemaining: number } | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
   useEffect(() => {
     setProvider(readLlmProvider());
@@ -121,6 +125,10 @@ export function HomeClient({ initialUser }: { initialUser: AuthenticatedUser | n
       .then((payload) => setUser(payload.user))
       .catch(() => setUser(null))
       .finally(() => setAuthLoaded(true));
+    void fetch("/api/billing/balance", { credentials: "same-origin", cache: "no-store" })
+      .then(async (response) => (response.ok ? await response.json() : null))
+      .then((payload) => setCreditState(payload || null))
+      .catch(() => setCreditState(null));
     const authState = new URLSearchParams(window.location.search).get("auth");
     if (authState === "error") {
       setLoginOpen(true);
@@ -240,6 +248,8 @@ export function HomeClient({ initialUser }: { initialUser: AuthenticatedUser | n
       if (payload.result) {
         setResult(payload.result); setReportJobTitle(titleFromJobDescription(jobDescription)); setGeneratedAt(payload.completedAt || new Date().toISOString()); setIsDemo(false);
         document.querySelector("#report")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        refreshCreditState();
+        window.dispatchEvent(new Event("credits:refresh"));
         setStatus("ready");
         return;
       }
@@ -249,10 +259,41 @@ export function HomeClient({ initialUser }: { initialUser: AuthenticatedUser | n
       const finished = await pollAnalysisStatus(payload.runId, () => setStatusNote("任务仍在后台排队，请稍候…"));
       setResult(finished.result); setReportJobTitle(titleFromJobDescription(jobDescription)); setGeneratedAt(finished.completedAt); setIsDemo(false);
       document.querySelector("#report")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      refreshCreditState();
+      window.dispatchEvent(new Event("credits:refresh"));
       setStatus("ready");
     } catch (caught) {
       setStatus("error"); setError(caught instanceof Error ? caught.message : "分析失败，请稍后重试。");
+      refreshCreditState();
+      window.dispatchEvent(new Event("credits:refresh"));
     }
+  }
+
+  function refreshCreditState() {
+    void fetch("/api/billing/balance", { credentials: "same-origin", cache: "no-store" })
+      .then(async (response) => (response.ok ? await response.json() : null))
+      .then((payload) => setCreditState(payload || null))
+      .catch(() => undefined);
+  }
+
+  function beginAnalyze() {
+    if (!resumeText || !jobDescription.trim()) return;
+    if (!supabaseEnabled) {
+      setStatus("error"); setError("尚未配置 Supabase。请先填写 .env.local 并执行数据库迁移。"); return;
+    }
+    if (!user) {
+      setLoginOpen(true); setAuthMessage("登录后即可安全保存简历与分析历史。 "); return;
+    }
+    if (creditState?.billingEnabled) {
+      if (creditState.balance < 1) {
+        setError("可用次数不足，请先充值后继续。");
+        router.push("/credits");
+        return;
+      }
+      setConfirmOpen(true);
+      return;
+    }
+    void analyze();
   }
 
   function openAuth(mode: "signIn" | "signUp" | "forgot") {
@@ -350,20 +391,20 @@ export function HomeClient({ initialUser }: { initialUser: AuthenticatedUser | n
   }
 
   const ready = Boolean(resumeText && jobDescription.trim());
-  const accountLabel = user?.email?.split("@")[0] || "我的账户";
-
   return <div className="shell">
-    <nav className="nav"><div className="brand"><span className="mark">履</span><b>履历</b><small>CAREER INTELLIGENCE</small></div><div className="nav-actions">{user ? <><Link className="history-link" href="/resume-pages">我的在线页</Link><Link className="history-link" href="/history">我的分析</Link><button className="account-button" type="button" onClick={() => void signOut()} title="退出登录">{accountLabel}<span>退出</span></button></> : <button className="login-button" type="button" onClick={() => openAuth("signIn")}>登录并保存</button>}<div className="nav-note"><i>●</i> 让每一次投递，更接近理想工作</div></div></nav>
+    <SiteNav authSlot={<button className="login-button" type="button" onClick={() => openAuth("signIn")}>登录并保存</button>} onSignOut={signOut} />
     <header className="hero"><div><div className="eyebrow">THE CAREER EDITOR / 01</div><h1>把经验，写成值得被看见的<em>机会。</em></h1></div><div className="hero-details"><p>上传你的履历，告诉我们你向往的岗位。我们将用一份清晰、诚实而有说服力的职业叙事，帮你走近下一次面试。</p><aside><b>从简历到回音</b><p>定位匹配 · 打磨表达 ·<br />为下一场对话做好准备</p></aside></div></header>
     <main>
       <section className="workspace" aria-label="求职材料输入区"><div className="workspace-head"><h2>给我两份材料</h2><span className="step">STEP 01 — 02</span></div><div className="input-grid">
         <article className="input-card"><div className="input-label"><span>你的简历</span><span>PDF</span></div><button className="upload" type="button" onClick={() => inputRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={onDrop}><div><div className="pdf">PDF</div><div className="file">{status === "reading" ? "正在提取简历文字…" : file?.name || "拖拽或点击上传简历"}</div><div className="meta">{file ? `${(file.size / 1024 / 1024).toFixed(1)} MB · 已解析文字` : "支持可选中文本的 PDF · 最大 20 MB"}</div>{status === "ready" && <div className="ready"><i>✓</i>{savedResumeId ? "已安全保存" : "已准备好分析"}</div>}</div></button><input ref={inputRef} type="file" accept="application/pdf,.pdf" onChange={onFileChange} hidden /></article>
         <article className="input-card"><div className="input-label"><span>目标岗位描述{jobDescription === sampleJob && <em className="input-example">举例</em>}</span><span>{jobDescription.length.toLocaleString()} / 3,000</span></div><textarea value={jobDescription} onChange={(event) => setJobDescription(event.target.value)} maxLength={3000} aria-label="岗位描述" /><div className="hint">{jobDescription === sampleJob ? "当前为示例内容，可直接覆盖" : "粘贴完整 JD，分析会更贴近真实招聘要求"}</div></article>
-      </div><div className="action-row"><span className="privacy">{user ? "你的材料仅用于本次分析与个人历史保存" : "登录后可安全保存材料与分析历史"}</span><LlmSelector value={provider} onChange={handleProviderChange} /><button className="analyze" type="button" disabled={!ready || status === "loading"} onClick={() => void analyze()}>{status === "loading" ? "正在深度分析…" : user ? "开始深度分析" : "登录后分析"}<span>→</span></button></div>{status === "loading" && statusNote && <p className="privacy" role="status">{statusNote}</p>}{error && <p className="error-message" role="alert">{error}</p>}</section>
+      </div><div className="action-row"><span className="privacy">{user ? "你的材料仅用于本次分析与个人历史保存" : "登录后可安全保存材料与分析历史"}</span><LlmSelector value={provider} onChange={handleProviderChange} /><button className="analyze" type="button" disabled={!ready || status === "loading"} onClick={() => void beginAnalyze()}>{status === "loading" ? "正在深度分析…" : user ? "开始深度分析" : "登录后分析"}<span>→</span></button></div>{creditState?.billingEnabled && <div className="credit-line"><span>本次消耗 1 点 · 可用 {creditState.balance} 点</span><Link href="/credits">充值 →</Link></div>}{status === "loading" && statusNote && <p className="privacy" role="status">{statusNote}</p>}{error && <p className="error-message" role="alert">{error}</p>}</section>
 
+      {creditState?.billingEnabled && !isDemo && <p className="credit-used-note">本次消耗 1 点 · 剩余 {creditState.balance} 点（免费额度剩余 {creditState.freeRemaining}）</p>}
       <AnalysisReport result={result} jobTitle={reportJobTitle} generatedAt={generatedAt} isDemo={isDemo} />
-    </main><footer><span>履历 · CAREER INTELLIGENCE</span><span>{user ? "分析结果已安全保存至你的账户" : "登录后保存你的材料与分析历史"}</span></footer>
+    </main>
 
     {loginOpen && <div className="auth-backdrop" role="presentation" onMouseDown={() => setLoginOpen(false)}><section className="auth-dialog" role="dialog" aria-modal="true" aria-labelledby="auth-title" onMouseDown={(event) => event.stopPropagation()}><button className="dialog-close" type="button" onClick={() => setLoginOpen(false)} aria-label="关闭">×</button><div className="section-no">ACCOUNT ACCESS</div><h2 id="auth-title">{authMode === "signUp" ? <>为下一次机会，<br />建立你的档案。</> : authMode === "forgot" ? <>重新设置，<br />继续向前。</> : <>把每一份努力，<br />妥善保存。</>}</h2><p>{authMode === "signUp" ? "创建账户后即可开始分析。你的求职材料与分析结果将只保存在个人账户中。" : authMode === "forgot" ? "输入你的注册邮箱。若账户存在，我们会发送安全的密码重设链接。" : "登录后，简历、岗位材料与分析结果只会保存在你的个人账户中。"}</p><div className="auth-tabs" role="tablist" aria-label="账户操作"><button type="button" role="tab" aria-selected={authMode === "signIn"} className={authMode === "signIn" ? "active" : ""} onClick={() => openAuth("signIn")}>登录</button><button type="button" role="tab" aria-selected={authMode === "signUp"} className={authMode === "signUp" ? "active" : ""} onClick={() => openAuth("signUp")}>注册</button></div><form onSubmit={(event) => void handleAuthSubmit(event)}><label htmlFor="email">邮箱地址</label><input id="email" type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" />{authMode !== "forgot" && <><label htmlFor="password">密码</label><input id="password" type="password" autoComplete={authMode === "signUp" ? "new-password" : "current-password"} required minLength={8} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="至少 8 位" />{authMode === "signUp" && <><label htmlFor="confirm-password">确认密码</label><input id="confirm-password" type="password" autoComplete="new-password" required minLength={8} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="再次输入密码" /></>}</>}<button className="auth-submit" type="submit" disabled={authLoading}>{authLoading ? "正在处理…" : authMode === "signUp" ? "创建账户并继续 →" : authMode === "forgot" ? "发送重设链接 →" : "登录并继续 →"}</button></form>{authMode === "signIn" && <button className="auth-inline-action" type="button" onClick={() => openAuth("forgot")}>忘记密码？</button>}{authMode === "forgot" && <button className="auth-inline-action" type="button" onClick={() => openAuth("signIn")}>返回登录</button>}{authMessage && <p className={`auth-message ${authMessageKind === "error" ? "error" : ""}`} role="status">{authMessage}</p>}<small>{authMode === "signUp" ? "无需邮箱确认，注册后可直接使用邮箱和密码登录。" : authMode === "forgot" ? "重设链接将发送至你的注册邮箱。" : "还没有账户？请选择“注册”创建一个。"}</small></section></div>}
+    {confirmOpen && <CreditConfirmDialog open={confirmOpen} balance={creditState?.balance ?? 0} note={`本次“简历分析 + 生成在线简历页”完整流程将消耗 1 点（免费额度优先）。当前可用 ${creditState?.balance ?? 0} 点。`} onConfirm={() => { setConfirmOpen(false); void analyze(); }} onCancel={() => setConfirmOpen(false)} />}
   </div>;
 }

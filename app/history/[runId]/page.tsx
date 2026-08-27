@@ -25,7 +25,7 @@ export default async function HistoryDetailPage({ params }: { params: Promise<{ 
   const { data: claimsData, error: claimsError } = await supabase.auth.getClaims();
   const userId = typeof claimsData?.claims?.sub === "string" ? claimsData.claims.sub : null;
   if (claimsError || !userId) {
-    return <main className="history-shell"><nav className="history-nav"><Link href="/history" className="back-link">← 返回我的分析</Link><span>履历 · ANALYSIS ARCHIVE</span></nav><AuthGate message="登录后查看分析详情。" /></main>;
+    return <main className="history-shell"><nav className="history-nav"><Link href="/history" className="back-link">← 返回历史分析结果</Link><span>履历 · ANALYSIS ARCHIVE</span></nav><AuthGate message="登录后查看分析详情。" /></main>;
   }
 
   const { data, error } = await supabase
@@ -39,7 +39,7 @@ export default async function HistoryDetailPage({ params }: { params: Promise<{ 
   if (error || !detail || detail.status !== "completed" || !detail.analysis_results) redirect("/history");
 
   return <main className="history-shell history-detail-shell">
-    <nav className="history-nav"><Link href="/history" className="back-link">← 返回我的分析</Link><Link href="/" className="history-continue">继续分析 →</Link></nav>
+    <nav className="history-nav"><Link href="/history" className="back-link">← 返回历史分析结果</Link><Link href="/" className="history-continue">继续分析 →</Link></nav>
     <AnalysisReport
       result={normalizeAnalysisResult(detail.analysis_results.result_json)}
       jobTitle={detail.job_descriptions?.job_title || "目标岗位"}

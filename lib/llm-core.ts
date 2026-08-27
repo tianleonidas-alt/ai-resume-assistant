@@ -52,7 +52,7 @@ export async function runChatCompletion(options: {
   messages: LlmChatMessage[];
   temperature?: number;
   json?: boolean;
-}): Promise<{ content: string; model: string }> {
+}): Promise<{ content: string; model: string; usage: { promptTokens: number | null; completionTokens: number | null; totalTokens: number | null } | null }> {
   const provider = getLlmProvider(options.provider);
   if (!provider) throw new Error(`不支持的模型提供方：${options.provider}。`);
 
@@ -86,10 +86,21 @@ export async function runChatCompletion(options: {
     throw new Error(`${provider.label} 服务暂时不可用或密钥无效，请检查配置后重试。${detail}`);
   }
 
-  const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+  const data = await response.json() as {
+    choices?: Array<{ message?: { content?: string } }>;
+    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  };
   const content = data.choices?.[0]?.message?.content;
   if (!content) throw new Error("AI 返回内容为空。");
-  return { content, model };
+  const rawUsage = data.usage;
+  const usage = rawUsage && typeof rawUsage === "object"
+    ? {
+        promptTokens: typeof rawUsage.prompt_tokens === "number" ? rawUsage.prompt_tokens : null,
+        completionTokens: typeof rawUsage.completion_tokens === "number" ? rawUsage.completion_tokens : null,
+        totalTokens: typeof rawUsage.total_tokens === "number" ? rawUsage.total_tokens : null,
+      }
+    : null;
+  return { content, model, usage };
 }
 
 /** Parse the first JSON object out of a model response (strips fences). */

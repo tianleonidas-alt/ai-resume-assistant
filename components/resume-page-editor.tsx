@@ -16,6 +16,7 @@ import {
   type ResumePageThemeId,
 } from "@/lib/resume-page";
 import { ResumePageView } from "@/components/resume-page-view";
+import { CreditConfirmDialog } from "@/components/credit-confirm";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
@@ -62,6 +63,8 @@ export function ResumePageEditor({ page: initial }: { page: ResumePageDTO }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [shareOpen, setShareOpen] = useState(false);
+  const [creditConfirmOpen, setCreditConfirmOpen] = useState(false);
+  const [creditBalance, setCreditBalance] = useState(0);
   const dirtyRef = useRef(false);
   const saveTimer = useRef<number | null>(null);
   const mountedRef = useRef(false);
@@ -124,11 +127,40 @@ export function ResumePageEditor({ page: initial }: { page: ResumePageDTO }) {
       setTitle(payload.page.title);
       setSaveState("saved");
       dirtyRef.current = false;
+      window.dispatchEvent(new Event("credits:refresh"));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "重新生成失败，请稍后重试。");
+      window.dispatchEvent(new Event("credits:refresh"));
     } finally {
       setBusy(false);
     }
+  }
+
+  function beginRegenerate() {
+    // 直传来源页面的重新生成会消耗 1 点，需先确认；历史来源页面不扣费。
+    if (!initial.sourceAnalysisRunId) {
+      void (async () => {
+        try {
+          const response = await fetch("/api/billing/balance", { credentials: "same-origin", cache: "no-store" });
+          const payload = response.ok ? await response.json() : null;
+          if (payload?.billingEnabled) {
+            if (payload.balance < 1) {
+              setError("可用次数不足，请先充值后继续。");
+              router.push("/credits");
+              return;
+            }
+            setCreditBalance(payload.balance);
+            setCreditConfirmOpen(true);
+            return;
+          }
+          void regenerate();
+        } catch {
+          void regenerate();
+        }
+      })();
+      return;
+    }
+    void regenerate();
   }
 
   async function publish() {
@@ -213,10 +245,10 @@ export function ResumePageEditor({ page: initial }: { page: ResumePageDTO }) {
   return (
     <div className="editor-shell">
       <nav className="editor-nav">
-        <Link className="back-link" href="/resume-pages">← 我的在线页</Link>
+        <Link className="back-link" href="/resume-pages">← 我的在线简历</Link>
         <span className="editor-save-state">{saveLabel}</span>
         <div className="editor-nav-actions">
-          <button type="button" disabled={busy} onClick={() => void regenerate()}>重新生成</button>
+          <button type="button" disabled={busy} onClick={() => beginRegenerate()}>重新生成</button>
           {status === "published"
             ? <button type="button" className="editor-unpublish" disabled={busy} onClick={() => void unpublish()}>取消发布</button>
             : <button type="button" className="editor-publish" disabled={busy} onClick={() => void publish()}>发布并分享</button>}
@@ -337,6 +369,13 @@ export function ResumePageEditor({ page: initial }: { page: ResumePageDTO }) {
           </section>
         </div>
       )}
+      <CreditConfirmDialog
+        open={creditConfirmOpen}
+        balance={creditBalance}
+        note={`重新生成将消耗 1 点（免费额度优先）。当前可用 ${creditBalance} 点。`}
+        onConfirm={() => { setCreditConfirmOpen(false); void regenerate(); }}
+        onCancel={() => setCreditConfirmOpen(false)}
+      />
     </div>
   );
 }

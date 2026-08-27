@@ -6,6 +6,7 @@ import { ANALYSIS_SYSTEM_PROMPT } from "@/lib/analysis-core";
 import { runChatCompletion } from "@/lib/llm-server";
 import { createAdminSupabaseClient } from "@/lib/supabase/admin";
 import { getAuthenticatedRequestUser } from "@/lib/supabase/request-user";
+import { reserveCredit, releaseCredit, recordLlmUsage } from "@/lib/billing";
 
 export const runtime = "nodejs";
 
@@ -20,11 +21,13 @@ function publicError(message: string, status: number) {
 
 export async function POST(request: Request) {
   let runId: string | null = null;
+  let userId: string | null = null;
   let admin: ReturnType<typeof createAdminSupabaseClient> | null = null;
 
   try {
     const user = await getAuthenticatedRequestUser(request);
     if (!user) return publicError("请先登录后再开始分析。", 401);
+    userId = user.id;
 
     const { resumeId, jobDescription, provider: providerInput } = await request.json() as {
       resumeId?: string;
@@ -51,6 +54,11 @@ export async function POST(request: Request) {
       .single();
     if (resumeError || !resume?.parsed_text) return publicError("未找到可用的简历文本，请重新上传。", 404);
 
+    // 原子预扣 1 点：成功则保留（即本次消耗），失败/异常由 catch 释放。
+    runId = crypto.randomUUID();
+    const reserved = await reserveCredit(user.id, runId, "简历分析 · 完整流程");
+    if (!reserved) return publicError("可用次数不足，请先充值后继续。", 402);
+
     const jobDescriptionId = crypto.randomUUID();
     const { error: jobError } = await admin.from("job_descriptions").insert({
       id: jobDescriptionId,
@@ -60,7 +68,6 @@ export async function POST(request: Request) {
     });
     if (jobError) throw jobError;
 
-    runId = crypto.randomUUID();
     const { error: runError } = await admin.from("analysis_runs").insert({
       id: runId,
       user_id: user.id,
@@ -88,7 +95,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ runId, status: "processing" }, { status: 202 });
     }
 
-    const { content } = await runChatCompletion({
+    const { content, model: usedModel, usage } = await runChatCompletion({
       provider,
       model,
       temperature: 0.45,
@@ -122,9 +129,25 @@ export async function POST(request: Request) {
       event_type: "analysis_completed",
     });
 
+    try {
+      await recordLlmUsage({
+        userId: user.id,
+        provider,
+        model: usedModel,
+        purpose: "analysis",
+        eventRef: runId,
+        usage,
+      });
+    } catch (billingError) {
+      console.error("Usage record failed", billingError);
+    }
+
     return NextResponse.json({ result, runId, completedAt });
   } catch (error) {
     console.error("Analysis failed", error);
+    if (runId && userId) {
+      await releaseCredit(userId, runId);
+    }
     if (runId && admin) {
       const completedAt = new Date().toISOString();
       await admin.from("analysis_runs").update({

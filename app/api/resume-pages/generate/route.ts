@@ -5,11 +5,12 @@ import { RESUME_PAGE_SYSTEM_PROMPT } from "@/lib/page-generate-core";
 import { DEFAULT_RESUME_PAGE_THEME, mapResumePageRow, normalizeResumePageContent } from "@/lib/resume-page";
 import { createAdminSupabaseClient } from "@/lib/supabase/admin";
 import { getAuthenticatedRequestUser } from "@/lib/supabase/request-user";
+import { reserveCredit, releaseCredit, recordLlmUsage } from "@/lib/billing";
 
 export const runtime = "nodejs";
 
 async function generatePageContent(resumeText: string, jobContext: string, provider: LlmProvider) {
-  const { content } = await runChatCompletion({
+  const { content, model, usage } = await runChatCompletion({
     provider,
     temperature: 0.45,
     json: true,
@@ -23,7 +24,7 @@ async function generatePageContent(resumeText: string, jobContext: string, provi
   });
   const normalized = normalizeResumePageContent(readJsonObject(content));
   const title = normalized.name ? `${normalized.name} · 在线简历` : "未命名在线简历页";
-  return { normalized, title: title.slice(0, 120) };
+  return { normalized, title: title.slice(0, 120), model, usage };
 }
 
 function publicError(message: string, status: number) {
@@ -31,9 +32,14 @@ function publicError(message: string, status: number) {
 }
 
 export async function POST(request: Request) {
+  let userId: string | null = null;
+  let pageId: string | null = null;
+  let directReserved = false;
+  let generated = false;
   try {
     const user = await getAuthenticatedRequestUser(request);
     if (!user) return publicError("请先登录后再生成在线简历页。", 401);
+    userId = user.id;
 
     let body: Record<string, unknown> = {};
     try {
@@ -95,6 +101,14 @@ export async function POST(request: Request) {
       return publicError("请上传可选中文本的 PDF 简历，或选择一个历史分析作为来源。", 400);
     }
 
+    const isDirectPdf = !analysisRunId;
+    if (isDirectPdf) {
+      // 原子预扣 1 点：成功则保留（即本次消耗），失败/异常由 catch 或后台函数释放。
+      pageId = crypto.randomUUID();
+      directReserved = await reserveCredit(user.id, pageId, "在线简历页生成 · 直传来源");
+      if (!directReserved) return publicError("可用次数不足，请先充值后继续。", 402);
+    }
+
     // Netlify 仅在构建期注入 NETLIFY，运行时只有 URL 可靠；两者都判断，确保线上走后台函数分支。
     const isNetlify = process.env.NETLIFY === "true" || Boolean(process.env.URL);
 
@@ -102,6 +116,7 @@ export async function POST(request: Request) {
       const { data: page, error: insertError } = await admin
         .from("resume_pages")
         .insert({
+          ...(pageId ? { id: pageId } : {}),
           user_id: user.id,
           source_resume_id: sourceResumeId,
           source_analysis_run_id: sourceAnalysisRunId,
@@ -119,14 +134,14 @@ export async function POST(request: Request) {
         throw new Error("保存生成的页面失败，请稍后重试。");
       }
 
-      const pageId = String((page as Record<string, unknown>).id);
+      const insertedId = String((page as Record<string, unknown>).id);
 
       return NextResponse.json(
         {
           page: mapResumePageRow(page as Record<string, unknown>),
           generationStatus: "pending",
           trigger: {
-            pageId,
+            pageId: insertedId,
             provider,
             resumeText,
             jobContext,
@@ -136,10 +151,11 @@ export async function POST(request: Request) {
       );
     }
 
-    const { normalized, title } = await generatePageContent(resumeText, jobContext, provider);
+    const { normalized, title, model: usedModel, usage } = await generatePageContent(resumeText, jobContext, provider);
     const { data: page, error: insertError } = await admin
       .from("resume_pages")
       .insert({
+        ...(pageId ? { id: pageId } : {}),
         user_id: user.id,
         source_resume_id: sourceResumeId,
         source_analysis_run_id: sourceAnalysisRunId,
@@ -158,9 +174,22 @@ export async function POST(request: Request) {
       throw new Error("保存生成的页面失败，请稍后重试。");
     }
 
+    generated = true;
+    await recordLlmUsage({
+      userId: user.id,
+      provider,
+      model: usedModel,
+      purpose: "resume_page",
+      eventRef: page.id,
+      usage,
+    });
+
     return NextResponse.json({ page: mapResumePageRow(page as Record<string, unknown>) }, { status: 201 });
   } catch (error) {
     console.error("Resume page generation failed", error);
+    if (directReserved && !generated && userId && pageId) {
+      await releaseCredit(userId, pageId);
+    }
     const message = error instanceof Error ? error.message : "生成失败，请稍后重试。";
     return publicError(message, 502);
   }

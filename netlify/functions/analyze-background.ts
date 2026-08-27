@@ -2,6 +2,7 @@ import { createClient } from "@supabase/supabase-js";
 import { isLlmProvider, readJsonObject, runChatCompletion } from "../../lib/llm-core";
 import { ANALYSIS_SYSTEM_PROMPT } from "../../lib/analysis-core";
 import { normalizeAnalysisResult, type AnalysisResult } from "../../lib/analysis";
+import { releaseCredit, recordLlmUsage } from "../../lib/billing";
 
 export const config = { background: true };
 
@@ -62,7 +63,7 @@ export default async function analyzeBackground(request: Request) {
     }
 
     const { provider, model } = providerFromModelKey(String(run.model || ""));
-    const { content } = await runChatCompletion({
+    const { content, model: usedModel, usage } = await runChatCompletion({
       provider,
       model,
       temperature: 0.45,
@@ -98,6 +99,19 @@ export default async function analyzeBackground(request: Request) {
       analysis_run_id: runId,
       event_type: "analysis_completed",
     });
+
+    try {
+      await recordLlmUsage({
+        userId: run.user_id,
+        provider,
+        model: usedModel,
+        purpose: "analysis",
+        eventRef: runId,
+        usage,
+      });
+    } catch (usageError) {
+      console.error("Usage record failed", usageError);
+    }
   } catch (error) {
     console.error("Analysis background failed", error);
     const message = error instanceof Error ? error.message : "分析未完成，请稍后重试。";
@@ -113,6 +127,8 @@ export default async function analyzeBackground(request: Request) {
         .eq("id", runId)
         .maybeSingle();
       if (run?.user_id) {
+        // 预扣在 /api/analyze 已生成；任务失败释放预扣。
+        await releaseCredit(run.user_id, runId);
         await admin.from("usage_events").insert({
           user_id: run.user_id,
           analysis_run_id: runId,

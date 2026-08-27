@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { AuthGate } from "@/components/auth-gate";
+import { SiteNav } from "@/components/site-nav";
 import { hasPublicSupabaseConfig } from "@/lib/supabase/config";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 
@@ -26,7 +27,7 @@ export default async function HistoryPage() {
   const { data: claimsData, error: claimsError } = await supabase.auth.getClaims();
   const userId = typeof claimsData?.claims?.sub === "string" ? claimsData.claims.sub : null;
   if (claimsError || !userId) {
-    return <main className="history-shell"><nav className="history-nav"><Link href="/" className="back-link">← 返回分析页</Link><span>履历 · ANALYSIS ARCHIVE</span></nav><AuthGate message="登录后查看你的分析历史。" /></main>;
+    return <main className="history-shell"><SiteNav /><AuthGate message="登录后查看你的分析历史。" /></main>;
   }
 
   const { data, error } = await supabase
@@ -39,7 +40,7 @@ export default async function HistoryPage() {
   const items = (data || []) as unknown as HistoryItem[];
 
   return <main className="history-shell">
-    <nav className="history-nav"><Link href="/" className="back-link">← 返回分析页</Link><span>履历 · ANALYSIS ARCHIVE</span></nav>
+    <SiteNav />
     <header className="history-header"><div className="section-no">YOUR PERSONAL ARCHIVE</div><h1>每一次认真准备，<br />都有迹可循。</h1><p>这里保存你专属的岗位分析记录。简历和结果仅对你的账户可见。</p></header>
     {error ? <p className="history-error">历史记录暂时无法读取，请稍后重试。</p> : items.length ? <section className="history-list">{items.map((item) => {
       const score = item.analysis_results?.score;

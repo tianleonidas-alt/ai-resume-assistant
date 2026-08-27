@@ -2,6 +2,7 @@ import { createClient } from "@supabase/supabase-js";
 import { isLlmProvider, readJsonObject, runChatCompletion } from "../../lib/llm-core";
 import { RESUME_PAGE_SYSTEM_PROMPT } from "../../lib/page-generate-core";
 import { normalizeResumePageContent } from "../../lib/resume-page";
+import { releaseCredit, recordLlmUsage } from "../../lib/billing";
 
 export const config = { background: true };
 
@@ -50,7 +51,7 @@ export default async function pageGenerateBackground(request: Request) {
       throw new Error("生成所需的简历文本缺失，请重新提交。");
     }
 
-    const { content } = await runChatCompletion({
+    const { content, model: usedModel, usage } = await runChatCompletion({
       provider,
       temperature: 0.45,
       json: true,
@@ -75,6 +76,19 @@ export default async function pageGenerateBackground(request: Request) {
       .eq("id", pageId)
       .eq("user_id", page.user_id);
     if (updateError) throw updateError;
+
+    try {
+      await recordLlmUsage({
+        userId: page.user_id,
+        provider,
+        model: usedModel,
+        purpose: "resume_page",
+        eventRef: pageId,
+        usage,
+      });
+    } catch (usageError) {
+      console.error("Usage record failed", usageError);
+    }
   } catch (error) {
     console.error("Resume page background generation failed", error);
     const message = error instanceof Error ? error.message : "生成失败，请稍后重试。";
@@ -83,6 +97,15 @@ export default async function pageGenerateBackground(request: Request) {
         .from("resume_pages")
         .update({ generation_status: "failed", generation_error: message.slice(0, 500) })
         .eq("id", pageId);
+      const { data: page } = await admin
+        .from("resume_pages")
+        .select("user_id, source_analysis_run_id")
+        .eq("id", pageId)
+        .maybeSingle();
+      if (page?.user_id && !page.source_analysis_run_id) {
+        // 直传来源页面的预扣由 /api/resume-pages/generate 生成，失败释放。
+        await releaseCredit(page.user_id, pageId);
+      }
     }
   }
 
